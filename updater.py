@@ -23,6 +23,7 @@ REQUIRED_PACKAGE_FILES = (
 MAX_ARCHIVE_SIZE = 512 * 1024 * 1024
 MAX_MEMBER_SIZE = 300 * 1024 * 1024
 MAX_EXTRACTED_SIZE = 600 * 1024 * 1024
+INSTALLED_EXECUTABLE_PARTS = ("Programs", "YT-DLP-GUI", "YT-DLP-GUI.exe")
 
 
 @dataclass(frozen=True)
@@ -149,19 +150,29 @@ def _windows_powershell_path() -> Path:
     return executable
 
 
+def _installed_executable_path() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        raise RuntimeError("The current Windows user's application directory could not be located.")
+    return Path(local_app_data).joinpath(*INSTALLED_EXECUTABLE_PARTS)
+
+
 def launch_update_after_exit(update: PreparedUpdate, process_id: int, restart_executable: Path) -> None:
     installer = _powershell_literal(update.installer_path)
     temporary_directory = _powershell_literal(update.temporary_directory)
-    restart_target = _powershell_literal(restart_executable)
+    installed_target = _powershell_literal(_installed_executable_path())
+    fallback_target = _powershell_literal(restart_executable)
     command = (
         "$ErrorActionPreference='Stop';"
         f"Wait-Process -Id {int(process_id)} -ErrorAction SilentlyContinue;"
         "$env:YT_DLP_GUI_SILENT='1';"
+        "$env:YT_DLP_GUI_NO_LAUNCH='1';"
         "$exitCode=1;"
         f"try {{ & {installer}; $exitCode=$LASTEXITCODE }} finally {{ "
         "Start-Sleep -Seconds 3;"
         f"Remove-Item -LiteralPath {temporary_directory} -Recurse -Force -ErrorAction SilentlyContinue }};"
-        f"if ($exitCode -ne 0) {{ Start-Process -FilePath {restart_target} }};"
+        f"if ($exitCode -eq 0 -and (Test-Path -LiteralPath {installed_target} -PathType Leaf)) "
+        f"{{ Start-Process -FilePath {installed_target} }} else {{ Start-Process -FilePath {fallback_target} }};"
         "exit $exitCode"
     )
     creation_flags = 0
