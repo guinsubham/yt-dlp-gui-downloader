@@ -87,7 +87,7 @@ function Save-VerifiedSizeDownload {
                 continue
             }
 
-            $response.EnsureSuccessStatusCode()
+            [void]$response.EnsureSuccessStatusCode()
             if ($response.Content.Headers.ContentLength -and $response.Content.Headers.ContentLength -ne $ExpectedSize) {
                 throw "The package server reported an unexpected file size."
             }
