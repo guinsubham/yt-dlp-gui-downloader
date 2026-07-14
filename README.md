@@ -11,6 +11,7 @@ A dark Windows desktop interface for downloading media with [yt-dlp](https://git
 - Automatic clipboard detection for copied YouTube links
 - Bundled FFmpeg support in the Windows executable
 - Verified first-run Deno setup for full YouTube support
+- In-app verified updates from the latest GitHub release
 - Dark Windows title bar and a responsive rounded interface
 
 ## Install on Windows

@@ -17,7 +17,10 @@ from urllib.request import Request, urlopen
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+from updater import get_latest_release, launch_update_after_exit, parse_version, prepare_update
+
 APP_NAME = "YT-DLP GUI Downloader"
+APP_VERSION = "1.0.3"
 ICON_PNG = "Ytdlp_gui_Icon.png"
 BRAILLE_WHEEL = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 DENO_RELEASE_API = "https://api.github.com/repos/denoland/deno/releases/latest"
@@ -620,6 +623,7 @@ class DownloadApp(tk.Tk):
         self.configure(bg=COLORS["bg"])
         self.log_q = queue.Queue()
         self.download_thread = None
+        self.update_thread = None
         self.spinner_index = 0
         self.progress_log_active = False
         self.last_progress_value = 0
@@ -633,6 +637,7 @@ class DownloadApp(tk.Tk):
         self._apply_window_chrome()
         self.status_var.set("Preparing")
         self.download_btn.configure(state="disabled")
+        self.update_btn.configure(state="disabled")
         self.after(120, self._drain_log)
         threading.Thread(target=self._bootstrap, daemon=True).start()
 
@@ -786,6 +791,19 @@ class DownloadApp(tk.Tk):
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="A Downloader based On yt-dlp", style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(header, text="YT-DLP GUI Downloader", style="Title.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.update_btn = RoundedButton(
+            header,
+            text="↻ Update",
+            command=self._start_update,
+            surface=COLORS["shell"],
+            fill=COLORS["panel_soft"],
+            hover_fill=COLORS["border"],
+            foreground=COLORS["text"],
+            width=96,
+            height=34,
+            radius=17,
+        )
+        self.update_btn.grid(row=0, column=1, rowspan=2, sticky="e", padx=(0, 10))
         self.status_var = tk.StringVar(value="Ready")
         status_badge = RoundedBadge(
             header,
@@ -794,7 +812,7 @@ class DownloadApp(tk.Tk):
             fill=COLORS["ready"],
             foreground=COLORS["ink"],
         )
-        status_badge.grid(row=0, column=1, rowspan=2, sticky="e")
+        status_badge.grid(row=0, column=2, rowspan=2, sticky="e")
 
         self.url_placeholder = "paste your link here"
         workspace = ttk.Frame(outer, style="Shell.TFrame")
@@ -1074,6 +1092,9 @@ class DownloadApp(tk.Tk):
     def set_download_enabled(self, enabled):
         self.after(0, lambda: self.download_btn.configure(state="normal" if enabled else "disabled"))
 
+    def set_update_enabled(self, enabled):
+        self.after(0, lambda: self.update_btn.configure(state="normal" if enabled else "disabled"))
+
     def _drain_log(self):
         try:
             while True:
@@ -1131,10 +1152,12 @@ class DownloadApp(tk.Tk):
             self.log("Ready.")
             self.set_status("Ready")
             self.set_download_enabled(True)
+            self.set_update_enabled(True)
         except Exception as e:
             self.runtime_ready = False
             self.set_status("Setup failed")
             self.set_download_enabled(False)
+            self.set_update_enabled(True)
             self.log(f"Dependency setup failed: {e}")
             self.after(0, messagebox.showerror, APP_NAME, f"First-run setup failed.\n\n{e}")
 
@@ -1147,6 +1170,61 @@ class DownloadApp(tk.Tk):
         folder = Path(self.folder_var.get()).expanduser()
         folder.mkdir(parents=True, exist_ok=True)
         os.startfile(folder)
+
+    def _start_update(self):
+        if not getattr(sys, "frozen", False):
+            messagebox.showinfo(APP_NAME, "Self-update is available in the installed Windows application.")
+            return
+        if self.download_thread and self.download_thread.is_alive():
+            messagebox.showinfo(APP_NAME, "Wait for the current download to finish before updating.")
+            return
+        if self.update_thread and self.update_thread.is_alive():
+            return
+
+        self.update_btn.configure(state="disabled", text="Checking")
+        self.download_btn.configure(state="disabled")
+        self.status_var.set("Checking")
+        self.log("Checking GitHub for an update...")
+        self.update_thread = threading.Thread(target=self._update_app, daemon=True)
+        self.update_thread.start()
+
+    def _update_app(self):
+        try:
+            release = get_latest_release()
+            if release.version <= parse_version(APP_VERSION):
+                self.log(f"Version {APP_VERSION} is already the latest release.")
+                self.after(0, self._finish_update_check, f"You already have the latest version ({APP_VERSION}).", False)
+                return
+
+            self.log(f"Update available: {APP_VERSION} -> {release.tag.lstrip('v')}")
+            self.set_status("Updating")
+            self.after(0, lambda: self.update_btn.configure(text="Updating"))
+            prepared_update = prepare_update(release, self.log)
+            self.after(0, self._install_prepared_update, prepared_update)
+        except Exception as error:
+            self.log(f"Update failed: {error}")
+            self.after(0, self._finish_update_check, f"The update could not be installed.\n\n{error}", True)
+
+    def _finish_update_check(self, message, is_error):
+        self.update_btn.configure(state="normal", text="↻ Update")
+        self.download_btn.configure(state="normal" if self.runtime_ready else "disabled")
+        self.status_var.set("Ready" if self.runtime_ready else "Preparing")
+        dialog = messagebox.showerror if is_error else messagebox.showinfo
+        dialog(APP_NAME, message)
+
+    def _install_prepared_update(self, prepared_update):
+        try:
+            launch_update_after_exit(prepared_update, os.getpid(), Path(sys.executable))
+        except Exception as error:
+            shutil.rmtree(prepared_update.temporary_directory, ignore_errors=True)
+            self.log(f"Update handoff failed: {error}")
+            self._finish_update_check(f"The update could not be started.\n\n{error}", True)
+            return
+
+        self.status_var.set("Restarting")
+        self.update_btn.configure(text="Restarting")
+        self.log(f"Update {prepared_update.release.tag} verified. Restarting to install...")
+        self.after(350, self.destroy)
 
     def _start_download(self):
         if self.download_thread and self.download_thread.is_alive():
@@ -1166,6 +1244,7 @@ class DownloadApp(tk.Tk):
         self.progress_var.set("Starting 8 chunk lanes...")
         self.status_var.set("Downloading")
         self.set_download_enabled(False)
+        self.set_update_enabled(False)
         self.download_thread = threading.Thread(target=self._download, args=(url, folder), daemon=True)
         self.download_thread.start()
 
@@ -1231,6 +1310,7 @@ class DownloadApp(tk.Tk):
             self.after(0, messagebox.showerror, APP_NAME, str(e))
         finally:
             self.set_download_enabled(True)
+            self.set_update_enabled(True)
 
 
 def verify_frozen_dependencies() -> None:

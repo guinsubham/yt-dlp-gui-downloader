@@ -75,5 +75,5 @@ goto :failed
 :failed
 echo.
 echo No security settings were disabled or excluded.
-pause
+if not defined YT_DLP_GUI_SILENT pause
 exit /b 1
