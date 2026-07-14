@@ -59,7 +59,7 @@ Only download media you own or have permission to save. You are responsible for 
 
 ## Credits
 
-Developed by [guinsubham](https://github.com/guinsubham) with ChatGPT as a coding co-author.
+This application was vibe coded by [guinsubham](https://github.com/guinsubham) with ChatGPT as a coding co-author.
 
 ## License
 
