@@ -72,9 +72,10 @@ class UpdaterTests(unittest.TestCase):
         )
 
         powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        installed_executable = Path(r"C:\Users\Example\AppData\Local\Programs\YT-DLP-GUI\YT-DLP-GUI.exe")
         with patch("updater._windows_powershell_path", return_value=powershell), patch(
-            "updater.subprocess.Popen"
-        ) as popen:
+            "updater._installed_executable_path", return_value=installed_executable
+        ), patch("updater.subprocess.Popen") as popen:
             updater.launch_update_after_exit(prepared, 12345, Path(sys.executable))
 
         arguments = popen.call_args.args[0]
@@ -82,8 +83,20 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(arguments[0], str(powershell))
         self.assertIn("Wait-Process -Id 12345", command)
         self.assertIn("YT_DLP_GUI_SILENT", command)
+        self.assertIn("YT_DLP_GUI_NO_LAUNCH", command)
         self.assertIn(str(prepared.installer_path), command)
+        self.assertIn("$exitCode -eq 0", command)
+        self.assertIn(str(installed_executable), command)
         self.assertIn(str(Path(sys.executable)), command)
+
+    def test_packaged_installer_defers_launch_during_an_in_app_update(self):
+        installer_path = Path(__file__).resolve().parents[1] / "packaging" / "Install-YT-DLP-GUI.bat"
+        installer = installer_path.read_text(encoding="ascii")
+
+        self.assertIn(
+            'if not defined YT_DLP_GUI_NO_LAUNCH start "" "%INSTALLED_EXE%"',
+            installer,
+        )
 
     def test_prepare_update_rejects_oversized_archive_member(self):
         archive_buffer = io.BytesIO()

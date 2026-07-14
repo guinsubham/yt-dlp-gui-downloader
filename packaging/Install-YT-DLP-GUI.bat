@@ -82,7 +82,7 @@ if errorlevel 1 goto :registry_failed
 
 echo.
 echo %APP_NAME% was installed successfully.
-start "" "%INSTALLED_EXE%"
+if not defined YT_DLP_GUI_NO_LAUNCH start "" "%INSTALLED_EXE%"
 exit /b 0
 
 :copy_failed
