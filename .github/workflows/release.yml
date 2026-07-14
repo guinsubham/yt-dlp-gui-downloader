@@ -53,8 +53,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ github.ref_name }}"
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $releases = gh release list --limit 100 --json tagName | ConvertFrom-Json
+          if ($releases.tagName -contains $tag) {
             gh release upload $tag "dist\YT-DLP-GUI-Windows.zip" --clobber
           } else {
             gh release create $tag "dist\YT-DLP-GUI-Windows.zip" --verify-tag --title "YT-DLP GUI Downloader $tag" --generate-notes
