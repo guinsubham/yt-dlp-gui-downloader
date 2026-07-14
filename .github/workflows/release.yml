@@ -62,6 +62,15 @@ jobs:
           Copy-Item -LiteralPath "third_party_licenses" -Destination "dist" -Recurse
           Compress-Archive -LiteralPath $exe, "dist\Install-YT-DLP-GUI.bat", "dist\Uninstall-YT-DLP-GUI.bat", "dist\LICENSE", "dist\THIRD_PARTY_NOTICES.md", "dist\third_party_licenses" -DestinationPath "dist\YT-DLP-GUI-Windows.zip" -CompressionLevel Optimal
 
+      - name: Verify packaged installer fingerprint
+        shell: powershell
+        run: |
+          $env:YT_DLP_GUI_VERIFY_ONLY = "1"
+          & "dist\Install-YT-DLP-GUI.bat"
+          if ($LASTEXITCODE -ne 0) {
+            throw "The packaged installer fingerprint check failed with exit code $LASTEXITCODE."
+          }
+
       - name: Attach package to release
         shell: powershell
         env:

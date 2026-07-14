@@ -226,6 +226,16 @@ try {
     }
 
     if ($VerifyOnly) {
+        $env:YT_DLP_GUI_VERIFY_ONLY = "1"
+        try {
+            & $installerPath
+            if ($LASTEXITCODE -ne 0) {
+                throw "The packaged installer fingerprint check exited with code $LASTEXITCODE."
+            }
+        }
+        finally {
+            Remove-Item Env:YT_DLP_GUI_VERIFY_ONLY -ErrorAction SilentlyContinue
+        }
         Write-Host "Version $($release.tag_name) was downloaded and verified successfully." -ForegroundColor Green
         return
     }

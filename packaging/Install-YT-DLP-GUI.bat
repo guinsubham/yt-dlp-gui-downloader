@@ -43,18 +43,21 @@ if not exist "%POWERSHELL%" (
     goto :failed
 )
 
-for /f "usebackq delims=" %%H in (`"%POWERSHELL%" -NoProfile -Command "(Get-FileHash -LiteralPath $env:SOURCE_EXE -Algorithm SHA256).Hash"`) do set "ACTUAL_HASH=%%H"
-if not defined ACTUAL_HASH (
+"%POWERSHELL%" -NoLogo -NoProfile -NonInteractive -Command "if ((Get-FileHash -LiteralPath $env:SOURCE_EXE -Algorithm SHA256).Hash -ne $env:EXPECTED_HASH) { exit 2 }"
+set "HASH_RESULT=%ERRORLEVEL%"
+if "%HASH_RESULT%"=="2" (
+    echo ERROR: The application fingerprint does not match this installer.
+    echo Installation stopped without changing your computer.
+    goto :failed
+)
+if not "%HASH_RESULT%"=="0" (
     echo ERROR: The application fingerprint could not be verified.
     goto :failed
 )
 
-if /I not "%ACTUAL_HASH%"=="%EXPECTED_HASH%" (
-    echo ERROR: The application fingerprint does not match this installer.
-    echo Expected: %EXPECTED_HASH%
-    echo Actual:   %ACTUAL_HASH%
-    echo Installation stopped without changing your computer.
-    goto :failed
+if defined YT_DLP_GUI_VERIFY_ONLY (
+    echo Package fingerprint verified.
+    exit /b 0
 )
 
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
