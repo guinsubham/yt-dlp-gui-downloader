@@ -14,9 +14,23 @@ A dark Windows desktop interface for downloading media with [yt-dlp](https://git
 
 ## Install on Windows
 
-Download `YT-DLP-GUI-Windows.zip` from the latest GitHub Release, extract all three files, and run `Install-YT-DLP-GUI.bat`.
+Install the latest release for your Windows user with one PowerShell command:
 
-The installer verifies the executable's SHA-256 fingerprint, installs for the current user, creates desktop and Start Menu shortcuts, and registers a clean uninstaller. It does not disable or modify Windows security settings.
+```powershell
+irm https://raw.githubusercontent.com/guinsubham/yt-dlp-gui-downloader/main/install.ps1 | iex
+```
+
+The script downloads the latest GitHub release, verifies its published SHA-256 digest, runs the packaged installer, and removes its temporary files. It creates desktop and Start Menu shortcuts and registers a clean uninstaller without requesting administrator access or changing Windows security settings.
+
+To review the installer before running it, download it first:
+
+```powershell
+irm https://raw.githubusercontent.com/guinsubham/yt-dlp-gui-downloader/main/install.ps1 -OutFile "$env:TEMP\install-ytdlp-gui.ps1"
+notepad "$env:TEMP\install-ytdlp-gui.ps1"
+& "$env:TEMP\install-ytdlp-gui.ps1"
+```
+
+Alternatively, download `YT-DLP-GUI-Windows.zip` from the latest GitHub Release, extract all three files, and run `Install-YT-DLP-GUI.bat`.
 
 The current Windows executable is unsigned, so Microsoft SmartScreen may identify it as an unrecognized application.
 
