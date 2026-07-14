@@ -4,14 +4,38 @@ import threading
 import subprocess
 import queue
 import ctypes
-from pathlib import Path
+import hashlib
+import importlib
+import json
+import re
+import shutil
+import tempfile
+import zipfile
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 APP_NAME = "YT-DLP GUI Downloader"
 ICON_PNG = "Ytdlp_gui_Icon.png"
 BRAILLE_WHEEL = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+DENO_RELEASE_API = "https://api.github.com/repos/denoland/deno/releases/latest"
+DENO_WINDOWS_ASSET = "deno-x86_64-pc-windows-msvc.zip"
+MINIMUM_DENO_VERSION = (2, 3, 0)
+
+REQUIRED_RUNTIME_MODULES = {
+    "brotli": "Brotli",
+    "certifi": "certificate bundle",
+    "Cryptodome": "cryptography support",
+    "imageio_ffmpeg": "FFmpeg support",
+    "mutagen": "media metadata support",
+    "requests": "HTTP support",
+    "urllib3": "HTTP transport",
+    "websockets": "WebSocket support",
+    "yt_dlp": "yt-dlp",
+    "yt_dlp_ejs": "YouTube challenge solver",
+}
 
 COLORS = {
     "bg": "#080808",
@@ -56,30 +80,164 @@ def resource_path(filename: str) -> Path:
 
 
 def ensure_runtime_deps(log):
-    """Install runtime packages only for source runs; the EXE already bundles them."""
+    """Validate the frozen bundle, or repair missing packages in a source checkout."""
     global yt_dlp, imageio_ffmpeg
-    missing = []
-    if yt_dlp is None:
-        missing.append("yt-dlp[default]")
-    if imageio_ffmpeg is None:
-        missing.append("imageio-ffmpeg")
-        log("FFmpeg is not installed. Downloading bundled FFmpeg support...")
+
+    def find_missing_modules():
+        missing_modules = []
+        for module_name, display_name in REQUIRED_RUNTIME_MODULES.items():
+            try:
+                importlib.import_module(module_name)
+            except Exception:
+                missing_modules.append(display_name)
+        return missing_modules
+
+    missing = find_missing_modules()
+    if missing and getattr(sys, "frozen", False):
+        raise RuntimeError(
+            "This application package is incomplete. Reinstall the latest release. "
+            f"Missing: {', '.join(missing)}."
+        )
 
     if missing:
-        log(f"Installing missing runtime packages: {', '.join(missing)}")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", *missing])
-        import importlib
-        yt_dlp = importlib.import_module("yt_dlp")
-        imageio_ffmpeg = importlib.import_module("imageio_ffmpeg")
+        log(f"Installing missing source dependencies: {', '.join(missing)}...")
+        subprocess.check_call([
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "yt-dlp[default]",
+            "imageio-ffmpeg",
+        ])
+        importlib.invalidate_caches()
+        missing = find_missing_modules()
+        if missing:
+            raise RuntimeError(f"Dependency installation did not provide: {', '.join(missing)}.")
+
+    yt_dlp = importlib.import_module("yt_dlp")
+    imageio_ffmpeg = importlib.import_module("imageio_ffmpeg")
 
 
 def get_ffmpeg_path() -> str | None:
     if imageio_ffmpeg is None:
         return None
     try:
-        return imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_path = Path(imageio_ffmpeg.get_ffmpeg_exe())
+        return str(ffmpeg_path) if ffmpeg_path.is_file() else None
     except Exception:
         return None
+
+
+def _managed_deno_path() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / "Programs" / "YT-DLP-GUI" / "runtime" / "deno.exe"
+    return Path.home() / ".yt-dlp-gui" / "runtime" / "deno.exe"
+
+
+def _deno_version(executable: Path) -> tuple[int, int, int] | None:
+    if not executable.is_file():
+        return None
+
+    try:
+        result = subprocess.run(
+            [str(executable), "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=15,
+            check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    match = re.search(r"^deno\s+(\d+)\.(\d+)\.(\d+)", result.stdout, re.MULTILINE)
+    if result.returncode != 0 or not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def _download_deno_runtime(target: Path, log) -> Path:
+    if sys.platform != "win32":
+        raise RuntimeError("Automatic Deno installation is currently supported on Windows only.")
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "YT-DLP-GUI-Dependency-Installer",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    api_request = Request(DENO_RELEASE_API, headers=headers)
+    with urlopen(api_request, timeout=30) as response:
+        release = json.load(response)
+
+    asset = next(
+        (item for item in release.get("assets", []) if item.get("name") == DENO_WINDOWS_ASSET),
+        None,
+    )
+    if asset is None:
+        raise RuntimeError(f"The latest Deno release does not contain {DENO_WINDOWS_ASSET}.")
+
+    digest_match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", str(asset.get("digest", "")))
+    if not digest_match:
+        raise RuntimeError("GitHub did not provide a valid SHA-256 digest for Deno.")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="YT-DLP-GUI-") as temporary_directory:
+        temporary_path = Path(temporary_directory)
+        archive_path = temporary_path / DENO_WINDOWS_ASSET
+        staged_executable = temporary_path / "deno.exe"
+        hasher = hashlib.sha256()
+
+        log(f"Downloading Deno {release.get('tag_name', '')} from its official release...")
+        download_request = Request(asset["browser_download_url"], headers=headers)
+        with urlopen(download_request, timeout=90) as response, archive_path.open("wb") as archive_file:
+            while chunk := response.read(1024 * 1024):
+                archive_file.write(chunk)
+                hasher.update(chunk)
+
+        if hasher.hexdigest().lower() != digest_match.group(1).lower():
+            raise RuntimeError("The downloaded Deno package failed SHA-256 verification.")
+
+        with zipfile.ZipFile(archive_path) as archive:
+            executable_members = [
+                item
+                for item in archive.infolist()
+                if not item.is_dir() and PurePosixPath(item.filename).name.lower() == "deno.exe"
+            ]
+            if len(executable_members) != 1:
+                raise RuntimeError("The verified Deno package does not contain one deno.exe file.")
+            with archive.open(executable_members[0]) as source, staged_executable.open("wb") as destination:
+                shutil.copyfileobj(source, destination)
+
+        version = _deno_version(staged_executable)
+        if version is None or version < MINIMUM_DENO_VERSION:
+            raise RuntimeError("The downloaded Deno executable did not pass its version check.")
+
+        os.replace(staged_executable, target)
+
+    log(f"Deno {'.'.join(map(str, version))} installed and verified.")
+    return target
+
+
+def ensure_deno_runtime(log, runtime_directory: Path | None = None) -> Path:
+    """Use a supported existing Deno, or securely install one for this app."""
+    managed_path = (runtime_directory / "deno.exe") if runtime_directory else _managed_deno_path()
+    candidates = [managed_path]
+    if runtime_directory is None:
+        system_deno = shutil.which("deno")
+        if system_deno:
+            candidates.append(Path(system_deno))
+
+    for candidate in candidates:
+        version = _deno_version(candidate)
+        if version is not None and version >= MINIMUM_DENO_VERSION:
+            log(f"Deno {'.'.join(map(str, version))} ready.")
+            return candidate
+
+    log("Deno is required for full YouTube support and is not installed.")
+    return _download_deno_runtime(managed_path, log)
 
 
 def format_eta(seconds) -> str:
@@ -468,9 +626,13 @@ class DownloadApp(tk.Tk):
         self.last_eta_text = "--:--:--"
         self.last_speed_text = "--"
         self.last_size_text = "--"
+        self.runtime_ready = False
+        self.deno_path = None
         self._build_style()
         self._build_ui()
         self._apply_window_chrome()
+        self.status_var.set("Preparing")
+        self.download_btn.configure(state="disabled")
         self.after(120, self._drain_log)
         threading.Thread(target=self._bootstrap, daemon=True).start()
 
@@ -957,16 +1119,24 @@ class DownloadApp(tk.Tk):
 
     def _bootstrap(self):
         try:
+            self.log("Checking bundled application dependencies...")
             ensure_runtime_deps(self.log)
             ffmpeg = get_ffmpeg_path()
+            if not ffmpeg:
+                raise RuntimeError("Bundled FFmpeg could not be loaded. Reinstall the latest release.")
+
+            self.log("Bundled yt-dlp, YouTube solver, and FFmpeg are ready.")
+            self.deno_path = ensure_deno_runtime(self.log)
+            self.runtime_ready = True
             self.log("Ready.")
             self.set_status("Ready")
-            if ffmpeg:
-                self.log(f"FFmpeg ready: {ffmpeg}")
-            else:
-                self.log("FFmpeg is not installed or could not be loaded.")
+            self.set_download_enabled(True)
         except Exception as e:
-            self.log(f"Dependency install/check failed: {e}")
+            self.runtime_ready = False
+            self.set_status("Setup failed")
+            self.set_download_enabled(False)
+            self.log(f"Dependency setup failed: {e}")
+            self.after(0, messagebox.showerror, APP_NAME, f"First-run setup failed.\n\n{e}")
 
     def _browse(self):
         folder = filedialog.askdirectory(initialdir=self.folder_var.get() or str(Path.home()))
@@ -1001,9 +1171,15 @@ class DownloadApp(tk.Tk):
 
     def _download(self, url: str, folder: Path):
         try:
+            if not self.runtime_ready:
+                raise RuntimeError("First-run dependency setup has not completed.")
+
             ensure_runtime_deps(self.log)
             preset = PRESETS[self.preset_var.get()].copy()
             ffmpeg = get_ffmpeg_path()
+            if not ffmpeg:
+                raise RuntimeError("Bundled FFmpeg is unavailable. Reinstall the latest release.")
+            self.deno_path = ensure_deno_runtime(self.log)
             outtmpl = str(folder / "%(title).200s [%(id)s].%(ext)s")
 
             def hook(d):
@@ -1034,18 +1210,15 @@ class DownloadApp(tk.Tk):
                 "windowsfilenames": True,
                 "ignoreerrors": False,
                 "concurrent_fragment_downloads": 8,
+                "js_runtimes": {"deno": {"path": str(self.deno_path)}},
             }
             ydl_opts.update(preset)
-            if ffmpeg:
-                ydl_opts["ffmpeg_location"] = ffmpeg
+            ydl_opts["ffmpeg_location"] = ffmpeg
 
             self.log(f"Preset: {self.preset_var.get()}")
             self.log(f"Saving to: {folder}")
             self.log("Chunk mode: 8 parallel fragments when supported by the source.")
-            if ffmpeg:
-                self.log(f"FFmpeg ready: {ffmpeg}")
-            else:
-                self.log("FFmpeg is not installed or could not be loaded. Video/audio merging may fail.")
+            self.log("All download dependencies are ready.")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
             self.set_status("Complete")
@@ -1060,6 +1233,23 @@ class DownloadApp(tk.Tk):
             self.set_download_enabled(True)
 
 
+def verify_frozen_dependencies() -> None:
+    """Exercise the release bundle and first-run download without opening the GUI."""
+    ensure_runtime_deps(lambda _message: None)
+    ffmpeg = get_ffmpeg_path()
+    if not ffmpeg:
+        raise RuntimeError("Bundled FFmpeg could not be loaded.")
+
+    with tempfile.TemporaryDirectory(prefix="YT-DLP-GUI-verify-") as temporary_directory:
+        ensure_deno_runtime(lambda _message: None, Path(temporary_directory))
+
+
 if __name__ == "__main__":
-    app = DownloadApp()
-    app.mainloop()
+    if "--verify-dependencies" in sys.argv:
+        try:
+            verify_frozen_dependencies()
+        except Exception:
+            sys.exit(1)
+    else:
+        app = DownloadApp()
+        app.mainloop()

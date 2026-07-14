@@ -10,6 +10,7 @@ A dark Windows desktop interface for downloading media with [yt-dlp](https://git
 - Live percentage, ETA, speed, file size, and activity output
 - Automatic clipboard detection for copied YouTube links
 - Bundled FFmpeg support in the Windows executable
+- Verified first-run Deno setup for full YouTube support
 - Dark Windows title bar and a responsive rounded interface
 
 ## Install on Windows
@@ -21,6 +22,8 @@ irm https://raw.githubusercontent.com/guinsubham/yt-dlp-gui-downloader/main/inst
 ```
 
 The script downloads the latest GitHub release, verifies its published SHA-256 digest, runs the packaged installer, and removes its temporary files. It creates desktop and Start Menu shortcuts and registers a clean uninstaller without requesting administrator access or changing Windows security settings.
+
+Python, yt-dlp, the YouTube challenge solver, and FFmpeg are bundled in the executable. On the first launch, the app downloads the recommended Deno JavaScript runtime from Deno's official GitHub release, verifies its published SHA-256 digest, and stores it inside the per-user app folder. Internet access is required for this one-time setup; downloading remains disabled until every dependency is ready.
 
 To review the installer before running it, download it first:
 

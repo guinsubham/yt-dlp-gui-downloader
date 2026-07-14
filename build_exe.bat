@@ -25,6 +25,7 @@ pyinstaller --noconfirm --clean --onefile --windowed --name "YT-DLP-GUI" ^
   --icon "Ytdlp_gui_Icon.ico" ^
   --add-data "Ytdlp_gui_Icon.png;." ^
   --collect-all yt_dlp ^
+  --collect-all yt_dlp_ejs ^
   --collect-all imageio_ffmpeg ^
   app.py
 if errorlevel 1 goto fail

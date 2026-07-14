@@ -27,12 +27,21 @@ jobs:
       - name: Build executable
         run: pyinstaller --noconfirm --clean YT-DLP-GUI.spec
 
+      - name: Verify frozen dependencies
+        shell: powershell
+        run: |
+          $process = Start-Process -FilePath "dist\YT-DLP-GUI.exe" -ArgumentList "--verify-dependencies" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "The frozen dependency preflight failed with exit code $($process.ExitCode)."
+          }
+
       - name: Assemble verified installer package
         shell: powershell
         run: |
           $exe = "dist\YT-DLP-GUI.exe"
           $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
-          $installer = (Get-Content -LiteralPath "packaging\Install-YT-DLP-GUI.bat" -Raw).Replace("__EXPECTED_HASH__", $hash)
+          $version = "${{ github.event.release.tag_name }}".TrimStart("v")
+          $installer = (Get-Content -LiteralPath "packaging\Install-YT-DLP-GUI.bat" -Raw).Replace("__EXPECTED_HASH__", $hash).Replace("__APP_VERSION__", $version)
           Set-Content -LiteralPath "dist\Install-YT-DLP-GUI.bat" -Value $installer -Encoding ASCII
           Copy-Item -LiteralPath "packaging\Uninstall-YT-DLP-GUI.bat" -Destination "dist\Uninstall-YT-DLP-GUI.bat"
           Compress-Archive -LiteralPath $exe, "dist\Install-YT-DLP-GUI.bat", "dist\Uninstall-YT-DLP-GUI.bat" -DestinationPath "dist\YT-DLP-GUI-Windows.zip" -CompressionLevel Optimal
