@@ -56,3 +56,11 @@ The standalone executable is written to `dist\YT-DLP-GUI.exe`.
 ## Usage
 
 Only download media you own or have permission to save. You are responsible for following the source website's terms and applicable law.
+
+## Credits
+
+Developed by [guinsubham](https://github.com/guinsubham) with ChatGPT as a coding co-author.
+
+## License
+
+The application source code is available under the [MIT License](LICENSE). Bundled and downloaded third-party components, including yt-dlp, FFmpeg, and Deno, remain subject to their respective licenses.
