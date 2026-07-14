@@ -1,6 +1,6 @@
 # YT-DLP GUI Downloader
 
-A dark Windows desktop interface for downloading media with [yt-dlp](https://github.com/yt-dlp/yt-dlp). The repository also contains an experimental native Android build.
+A dark Windows desktop interface for downloading media with [yt-dlp](https://github.com/yt-dlp/yt-dlp).
 
 ## Features
 
@@ -34,18 +34,6 @@ build_exe.bat
 ```
 
 The standalone executable is written to `dist\YT-DLP-GUI.exe`.
-
-## Android build
-
-The Android project lives in `android_app`. It requires JDK 17, Android SDK 35, and Gradle 8.10.2 or a compatible Gradle installation.
-
-Set `JAVA_HOME` and either `ANDROID_HOME` or `ANDROID_SDK_ROOT`, then run:
-
-```bat
-build_android.bat
-```
-
-The Android build is experimental. FFmpeg-dependent merging may require additional Android FFmpeg support.
 
 ## Usage
 

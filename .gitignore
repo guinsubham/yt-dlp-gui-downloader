@@ -7,13 +7,6 @@ __pycache__/
 build/
 dist/
 
-# Android and Gradle output
-android_sdk/
-tools/
-android_app/.gradle/
-android_app/app/build/
-android_app/local.properties
-
 # Local screenshots and editor files
 current_gui*.png
 .idea/
