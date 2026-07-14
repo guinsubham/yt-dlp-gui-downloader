@@ -1,8 +1,9 @@
 name: Build Windows release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
@@ -40,7 +41,7 @@ jobs:
         run: |
           $exe = "dist\YT-DLP-GUI.exe"
           $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
-          $version = "${{ github.event.release.tag_name }}".TrimStart("v")
+          $version = "${{ github.ref_name }}".TrimStart("v")
           $installer = (Get-Content -LiteralPath "packaging\Install-YT-DLP-GUI.bat" -Raw).Replace("__EXPECTED_HASH__", $hash).Replace("__APP_VERSION__", $version)
           Set-Content -LiteralPath "dist\Install-YT-DLP-GUI.bat" -Value $installer -Encoding ASCII
           Copy-Item -LiteralPath "packaging\Uninstall-YT-DLP-GUI.bat" -Destination "dist\Uninstall-YT-DLP-GUI.bat"
@@ -50,4 +51,11 @@ jobs:
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "dist\YT-DLP-GUI-Windows.zip" --clobber
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag "dist\YT-DLP-GUI-Windows.zip" --clobber
+          } else {
+            gh release create $tag "dist\YT-DLP-GUI-Windows.zip" --verify-tag --title "YT-DLP GUI Downloader $tag" --generate-notes
+          }
