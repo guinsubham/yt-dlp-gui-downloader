@@ -25,12 +25,12 @@ class UpdaterTests(unittest.TestCase):
             "tag_name": "v2.0.0",
             "assets": [{
                 "name": updater.WINDOWS_ASSET_NAME,
-                "browser_download_url": "https://example.test/update.zip",
+                "browser_download_url": "https://github.com/example/project/releases/download/v2/update.zip",
                 "digest": "",
                 "size": 100,
             }],
         }
-        with patch("updater.urlopen", return_value=io.BytesIO(json.dumps(payload).encode())):
+        with patch("networking._open_allowlisted", return_value=io.BytesIO(json.dumps(payload).encode())):
             with self.assertRaisesRegex(RuntimeError, "SHA-256"):
                 updater.get_latest_release()
 
@@ -44,12 +44,12 @@ class UpdaterTests(unittest.TestCase):
         release = updater.ReleaseInfo(
             tag="v2.0.0",
             version=(2, 0, 0),
-            download_url="https://example.test/update.zip",
+            download_url="https://github.com/example/project/releases/download/v2/update.zip",
             sha256=hashlib.sha256(archive_bytes).hexdigest(),
             size=len(archive_bytes),
         )
 
-        with patch("updater.urlopen", return_value=io.BytesIO(archive_bytes)):
+        with patch("networking._open_allowlisted", return_value=io.BytesIO(archive_bytes)):
             prepared = updater.prepare_update(release, lambda _message: None)
         try:
             extracted = {item.name for item in prepared.installer_path.parent.iterdir()}
@@ -58,23 +58,52 @@ class UpdaterTests(unittest.TestCase):
             shutil.rmtree(prepared.temporary_directory, ignore_errors=True)
 
     def test_launch_update_builds_detached_wait_and_restart_command(self):
-        release = updater.ReleaseInfo("v2.0.0", (2, 0, 0), "https://example.test", "0" * 64, 1)
+        release = updater.ReleaseInfo(
+            "v2.0.0",
+            (2, 0, 0),
+            "https://github.com/example/project/releases/download/v2/update.zip",
+            "0" * 64,
+            1,
+        )
         prepared = updater.PreparedUpdate(
             release=release,
             temporary_directory=Path(r"C:\Temp\YT-DLP-GUI-update"),
             installer_path=Path(r"C:\Temp\YT-DLP-GUI-update\Install-YT-DLP-GUI.bat"),
         )
 
-        with patch("updater.subprocess.Popen") as popen:
+        powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        with patch("updater._windows_powershell_path", return_value=powershell), patch(
+            "updater.subprocess.Popen"
+        ) as popen:
             updater.launch_update_after_exit(prepared, 12345, Path(sys.executable))
 
         arguments = popen.call_args.args[0]
         command = arguments[-1]
-        self.assertEqual(arguments[0], "powershell.exe")
+        self.assertEqual(arguments[0], str(powershell))
         self.assertIn("Wait-Process -Id 12345", command)
         self.assertIn("YT_DLP_GUI_SILENT", command)
         self.assertIn(str(prepared.installer_path), command)
         self.assertIn(str(Path(sys.executable)), command)
+
+    def test_prepare_update_rejects_oversized_archive_member(self):
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w") as archive:
+            for name in updater.REQUIRED_PACKAGE_FILES:
+                archive.writestr(name, "x")
+        archive_bytes = archive_buffer.getvalue()
+        release = updater.ReleaseInfo(
+            tag="v2.0.0",
+            version=(2, 0, 0),
+            download_url="https://github.com/example/project/releases/download/v2/update.zip",
+            sha256=hashlib.sha256(archive_bytes).hexdigest(),
+            size=len(archive_bytes),
+        )
+
+        with patch("networking._open_allowlisted", return_value=io.BytesIO(archive_bytes)), patch(
+            "updater.MAX_MEMBER_SIZE", 0
+        ):
+            with self.assertRaisesRegex(RuntimeError, "extraction limit"):
+                updater.prepare_update(release, lambda _message: None)
 
 
 if __name__ == "__main__":

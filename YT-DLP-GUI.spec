@@ -9,8 +9,6 @@ tmp_ret = collect_all('yt_dlp')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('yt_dlp_ejs')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('imageio_ffmpeg')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
@@ -22,7 +20,17 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'altgraph',
+        'curl_cffi',
+        'imageio_ffmpeg',
+        'mutagen',
+        'packaging',
+        'pefile',
+        'secretstorage',
+        'setuptools',
+        'win32ctypes',
+    ],
     noarchive=False,
     optimize=0,
 )

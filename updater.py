@@ -1,23 +1,28 @@
-import hashlib
-import json
+import ctypes
 import os
 import re
 import shutil
-import subprocess
+# Required for the verified update handoff.
+import subprocess  # nosec B404
 import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from urllib.request import Request, urlopen
+
+from networking import copy_stream_limited, download_verified_file, github_asset_details, read_json
 
 RELEASE_API = "https://api.github.com/repos/guinsubham/yt-dlp-gui-downloader/releases/latest"
 WINDOWS_ASSET_NAME = "YT-DLP-GUI-Windows.zip"
 REQUIRED_PACKAGE_FILES = (
     "Install-YT-DLP-GUI.bat",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "Uninstall-YT-DLP-GUI.bat",
     "YT-DLP-GUI.exe",
 )
 MAX_ARCHIVE_SIZE = 512 * 1024 * 1024
+MAX_MEMBER_SIZE = 300 * 1024 * 1024
+MAX_EXTRACTED_SIZE = 600 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -49,8 +54,7 @@ def get_latest_release() -> ReleaseInfo:
         "User-Agent": "YT-DLP-GUI-Updater",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    with urlopen(Request(RELEASE_API, headers=headers), timeout=30) as response:
-        release = json.load(response)
+    release = read_json(RELEASE_API, headers)
 
     asset = next(
         (item for item in release.get("assets", []) if item.get("name") == WINDOWS_ASSET_NAME),
@@ -59,20 +63,14 @@ def get_latest_release() -> ReleaseInfo:
     if asset is None:
         raise RuntimeError(f"The latest release does not contain {WINDOWS_ASSET_NAME}.")
 
-    digest_match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", str(asset.get("digest", "")))
-    if not digest_match:
-        raise RuntimeError("GitHub did not provide a valid SHA-256 digest for the update.")
-
-    size = int(asset.get("size", 0))
-    if size <= 0 or size > MAX_ARCHIVE_SIZE:
-        raise RuntimeError("GitHub reported an invalid update package size.")
+    download_url, digest, size = github_asset_details(asset, maximum_size=MAX_ARCHIVE_SIZE)
 
     tag = str(release.get("tag_name", ""))
     return ReleaseInfo(
         tag=tag,
         version=parse_version(tag),
-        download_url=str(asset["browser_download_url"]),
-        sha256=digest_match.group(1).lower(),
+        download_url=download_url,
+        sha256=digest,
         size=size,
     )
 
@@ -84,24 +82,15 @@ def prepare_update(release: ReleaseInfo, log) -> PreparedUpdate:
     package_directory.mkdir()
 
     try:
-        headers = {"User-Agent": "YT-DLP-GUI-Updater"}
-        request = Request(release.download_url, headers=headers)
-        hasher = hashlib.sha256()
-        downloaded_size = 0
-
         log(f"Downloading update {release.tag} from GitHub...")
-        with urlopen(request, timeout=120) as response, archive_path.open("wb") as destination:
-            while chunk := response.read(1024 * 1024):
-                downloaded_size += len(chunk)
-                if downloaded_size > MAX_ARCHIVE_SIZE:
-                    raise RuntimeError("The update package exceeded the allowed size.")
-                destination.write(chunk)
-                hasher.update(chunk)
-
-        if downloaded_size != release.size:
-            raise RuntimeError("The downloaded update size does not match GitHub metadata.")
-        if hasher.hexdigest().lower() != release.sha256:
-            raise RuntimeError("The downloaded update failed SHA-256 verification.")
+        download_verified_file(
+            release.download_url,
+            archive_path,
+            expected_sha256=release.sha256,
+            expected_size=release.size,
+            maximum_size=MAX_ARCHIVE_SIZE,
+            headers={"User-Agent": "YT-DLP-GUI-Updater"},
+        )
 
         log("Update checksum verified. Preparing installation...")
         with zipfile.ZipFile(archive_path) as archive:
@@ -119,10 +108,19 @@ def prepare_update(release: ReleaseInfo, log) -> PreparedUpdate:
             if missing:
                 raise RuntimeError(f"The verified update is incomplete: {', '.join(missing)}.")
 
+            extracted_size = sum(member.file_size for member in members_by_name.values())
+            if extracted_size > MAX_EXTRACTED_SIZE:
+                raise RuntimeError("The update exceeded the total extraction limit.")
+
             for name, member in members_by_name.items():
                 destination_path = package_directory / name
                 with archive.open(member) as source, destination_path.open("wb") as destination:
-                    shutil.copyfileobj(source, destination)
+                    copy_stream_limited(
+                        source,
+                        destination,
+                        expected_size=member.file_size,
+                        maximum_size=MAX_MEMBER_SIZE,
+                    )
 
         return PreparedUpdate(
             release=release,
@@ -136,6 +134,19 @@ def prepare_update(release: ReleaseInfo, log) -> PreparedUpdate:
 
 def _powershell_literal(value: Path) -> str:
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def _windows_powershell_path() -> Path:
+    if os.name != "nt":
+        raise RuntimeError("Automatic update installation is supported on Windows only.")
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
+    if length <= 0 or length >= len(buffer):
+        raise RuntimeError("The Windows system directory could not be located.")
+    executable = Path(buffer.value) / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    if not executable.is_file():
+        raise RuntimeError("Windows PowerShell could not be located in the system directory.")
+    return executable
 
 
 def launch_update_after_exit(update: PreparedUpdate, process_id: int, restart_executable: Path) -> None:
@@ -157,9 +168,10 @@ def launch_update_after_exit(update: PreparedUpdate, process_id: int, restart_ex
     if os.name == "nt":
         creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
 
-    subprocess.Popen(
+    # Use the absolute system executable; no command search or shell expansion occurs.
+    subprocess.Popen(  # nosec B603
         [
-            "powershell.exe",
+            str(_windows_powershell_path()),
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",

@@ -8,9 +8,8 @@ A dark Windows desktop interface for downloading media with [yt-dlp](https://git
 - MP3 and M4A audio-only presets
 - Eight concurrent fragment workers for supported downloads
 - Live percentage, ETA, speed, file size, and activity output
-- Automatic clipboard detection for copied YouTube links
-- Bundled FFmpeg support in the Windows executable
-- Verified first-run Deno setup for full YouTube support
+- Automatic clipboard detection for copied media links
+- Verified first-run setup for the media processor and script runtime
 - In-app verified updates from the latest GitHub release
 - Dark Windows title bar and a responsive rounded interface
 
@@ -24,7 +23,7 @@ irm https://raw.githubusercontent.com/guinsubham/yt-dlp-gui-downloader/main/inst
 
 The script downloads the latest GitHub release, verifies its published SHA-256 digest, runs the packaged installer, and removes its temporary files. It creates desktop and Start Menu shortcuts and registers a clean uninstaller without requesting administrator access or changing Windows security settings.
 
-Python, yt-dlp, the YouTube challenge solver, and FFmpeg are bundled in the executable. On the first launch, the app downloads the recommended Deno JavaScript runtime from Deno's official GitHub release, verifies its published SHA-256 digest, and stores it inside the per-user app folder. Internet access is required for this one-time setup; downloading remains disabled until every dependency is ready.
+Python, yt-dlp, and the challenge solver are bundled in the executable. On the first launch, the app downloads the recommended script runtime and LGPL media processor from their official GitHub releases, verifies each published SHA-256 digest, and stores them inside the per-user app folder. Internet access is required for this one-time setup; downloading remains disabled until every dependency is ready.
 
 To review the installer before running it, download it first:
 
@@ -63,4 +62,4 @@ This application was vibe coded by [guinsubham](https://github.com/guinsubham) w
 
 ## License
 
-The application source code is available under the [MIT License](LICENSE). Bundled and downloaded third-party components, including yt-dlp, FFmpeg, and Deno, remain subject to their respective licenses.
+The application source code is available under the [MIT License](LICENSE). Bundled and downloaded third-party components remain subject to their own licenses; see [Third-Party Notices](THIRD_PARTY_NOTICES.md).

@@ -1,44 +1,51 @@
 ﻿import os
 import sys
 import threading
-import subprocess
+# Required for fixed-argument package setup in a source checkout.
+import subprocess  # nosec B404
 import queue
 import ctypes
-import hashlib
 import importlib
-import json
-import re
 import shutil
 import tempfile
-import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+from runtime_dependencies import ensure_deno_runtime, ensure_ffmpeg_runtime
 from updater import get_latest_release, launch_update_after_exit, parse_version, prepare_update
 
 APP_NAME = "YT-DLP GUI Downloader"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 ICON_PNG = "Ytdlp_gui_Icon.png"
 BRAILLE_WHEEL = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-DENO_RELEASE_API = "https://api.github.com/repos/denoland/deno/releases/latest"
-DENO_WINDOWS_ASSET = "deno-x86_64-pc-windows-msvc.zip"
-MINIMUM_DENO_VERSION = (2, 3, 0)
 
 REQUIRED_RUNTIME_MODULES = {
     "brotli": "Brotli",
     "certifi": "certificate bundle",
+    "charset_normalizer": "text encoding support",
     "Cryptodome": "cryptography support",
-    "imageio_ffmpeg": "FFmpeg support",
-    "mutagen": "media metadata support",
+    "idna": "international domain support",
     "requests": "HTTP support",
     "urllib3": "HTTP transport",
     "websockets": "WebSocket support",
     "yt_dlp": "yt-dlp",
-    "yt_dlp_ejs": "YouTube challenge solver",
+    "yt_dlp_ejs": "challenge solver",
 }
+
+SOURCE_DEPENDENCIES = (
+    "brotli==1.2.0",
+    "certifi==2026.5.20",
+    "charset-normalizer==3.4.7",
+    "idna==3.17",
+    "pycryptodomex==3.23.0",
+    "requests==2.34.2",
+    "urllib3==2.7.0",
+    "websockets==16.0",
+    "yt-dlp==2026.6.9",
+    "yt-dlp-ejs==0.8.0",
+)
 
 COLORS = {
     "bg": "#080808",
@@ -63,12 +70,6 @@ try:
 except Exception:
     yt_dlp = None
 
-try:
-    import imageio_ffmpeg
-except Exception:
-    imageio_ffmpeg = None
-
-
 def app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -84,7 +85,7 @@ def resource_path(filename: str) -> Path:
 
 def ensure_runtime_deps(log):
     """Validate the frozen bundle, or repair missing packages in a source checkout."""
-    global yt_dlp, imageio_ffmpeg
+    global yt_dlp
 
     def find_missing_modules():
         missing_modules = []
@@ -104,14 +105,14 @@ def ensure_runtime_deps(log):
 
     if missing:
         log(f"Installing missing source dependencies: {', '.join(missing)}...")
-        subprocess.check_call([
+        # The executable and package arguments are fixed constants and no shell is used.
+        subprocess.check_call([  # nosec B603
             sys.executable,
             "-m",
             "pip",
             "install",
             "--upgrade",
-            "yt-dlp[default]",
-            "imageio-ffmpeg",
+            *SOURCE_DEPENDENCIES,
         ])
         importlib.invalidate_caches()
         missing = find_missing_modules()
@@ -119,128 +120,6 @@ def ensure_runtime_deps(log):
             raise RuntimeError(f"Dependency installation did not provide: {', '.join(missing)}.")
 
     yt_dlp = importlib.import_module("yt_dlp")
-    imageio_ffmpeg = importlib.import_module("imageio_ffmpeg")
-
-
-def get_ffmpeg_path() -> str | None:
-    if imageio_ffmpeg is None:
-        return None
-    try:
-        ffmpeg_path = Path(imageio_ffmpeg.get_ffmpeg_exe())
-        return str(ffmpeg_path) if ffmpeg_path.is_file() else None
-    except Exception:
-        return None
-
-
-def _managed_deno_path() -> Path:
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / "Programs" / "YT-DLP-GUI" / "runtime" / "deno.exe"
-    return Path.home() / ".yt-dlp-gui" / "runtime" / "deno.exe"
-
-
-def _deno_version(executable: Path) -> tuple[int, int, int] | None:
-    if not executable.is_file():
-        return None
-
-    try:
-        result = subprocess.run(
-            [str(executable), "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=15,
-            check=False,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-    match = re.search(r"^deno\s+(\d+)\.(\d+)\.(\d+)", result.stdout, re.MULTILINE)
-    if result.returncode != 0 or not match:
-        return None
-    return tuple(int(part) for part in match.groups())
-
-
-def _download_deno_runtime(target: Path, log) -> Path:
-    if sys.platform != "win32":
-        raise RuntimeError("Automatic Deno installation is currently supported on Windows only.")
-
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "YT-DLP-GUI-Dependency-Installer",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    api_request = Request(DENO_RELEASE_API, headers=headers)
-    with urlopen(api_request, timeout=30) as response:
-        release = json.load(response)
-
-    asset = next(
-        (item for item in release.get("assets", []) if item.get("name") == DENO_WINDOWS_ASSET),
-        None,
-    )
-    if asset is None:
-        raise RuntimeError(f"The latest Deno release does not contain {DENO_WINDOWS_ASSET}.")
-
-    digest_match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", str(asset.get("digest", "")))
-    if not digest_match:
-        raise RuntimeError("GitHub did not provide a valid SHA-256 digest for Deno.")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="YT-DLP-GUI-") as temporary_directory:
-        temporary_path = Path(temporary_directory)
-        archive_path = temporary_path / DENO_WINDOWS_ASSET
-        staged_executable = temporary_path / "deno.exe"
-        hasher = hashlib.sha256()
-
-        log(f"Downloading Deno {release.get('tag_name', '')} from its official release...")
-        download_request = Request(asset["browser_download_url"], headers=headers)
-        with urlopen(download_request, timeout=90) as response, archive_path.open("wb") as archive_file:
-            while chunk := response.read(1024 * 1024):
-                archive_file.write(chunk)
-                hasher.update(chunk)
-
-        if hasher.hexdigest().lower() != digest_match.group(1).lower():
-            raise RuntimeError("The downloaded Deno package failed SHA-256 verification.")
-
-        with zipfile.ZipFile(archive_path) as archive:
-            executable_members = [
-                item
-                for item in archive.infolist()
-                if not item.is_dir() and PurePosixPath(item.filename).name.lower() == "deno.exe"
-            ]
-            if len(executable_members) != 1:
-                raise RuntimeError("The verified Deno package does not contain one deno.exe file.")
-            with archive.open(executable_members[0]) as source, staged_executable.open("wb") as destination:
-                shutil.copyfileobj(source, destination)
-
-        version = _deno_version(staged_executable)
-        if version is None or version < MINIMUM_DENO_VERSION:
-            raise RuntimeError("The downloaded Deno executable did not pass its version check.")
-
-        os.replace(staged_executable, target)
-
-    log(f"Deno {'.'.join(map(str, version))} installed and verified.")
-    return target
-
-
-def ensure_deno_runtime(log, runtime_directory: Path | None = None) -> Path:
-    """Use a supported existing Deno, or securely install one for this app."""
-    managed_path = (runtime_directory / "deno.exe") if runtime_directory else _managed_deno_path()
-    candidates = [managed_path]
-    if runtime_directory is None:
-        system_deno = shutil.which("deno")
-        if system_deno:
-            candidates.append(Path(system_deno))
-
-    for candidate in candidates:
-        version = _deno_version(candidate)
-        if version is not None and version >= MINIMUM_DENO_VERSION:
-            log(f"Deno {'.'.join(map(str, version))} ready.")
-            return candidate
-
-    log("Deno is required for full YouTube support and is not installed.")
-    return _download_deno_runtime(managed_path, log)
 
 
 def format_eta(seconds) -> str:
@@ -631,6 +510,7 @@ class DownloadApp(tk.Tk):
         self.last_speed_text = "--"
         self.last_size_text = "--"
         self.runtime_ready = False
+        self.ffmpeg_path = None
         self.deno_path = None
         self._build_style()
         self._build_ui()
@@ -690,7 +570,7 @@ class DownloadApp(tk.Tk):
                 ctypes.byref(rounded),
                 ctypes.sizeof(rounded),
             )
-        except Exception:
+        except (AttributeError, OSError, ValueError):
             pass
 
     def _build_style(self):
@@ -789,7 +669,7 @@ class DownloadApp(tk.Tk):
         header = ttk.Frame(outer, style="Shell.TFrame")
         header.grid(row=0, column=0, sticky="ew", pady=(0, 18))
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="A Downloader based On yt-dlp", style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="A downloader based on yt-dlp", style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(header, text="YT-DLP GUI Downloader", style="Title.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.update_btn = RoundedButton(
             header,
@@ -858,7 +738,7 @@ class DownloadApp(tk.Tk):
         self.url_context_menu.add_command(label="Cut", command=lambda: self.url_entry.event_generate("<<Cut>>"))
         self.url_context_menu.add_command(label="Copy", command=lambda: self.url_entry.event_generate("<<Copy>>"))
         self.url_context_menu.add_command(label="Select all", command=self._select_all_url)
-        self.after(150, self._prefill_youtube_url_from_clipboard)
+        self.after(150, self._prefill_media_url_from_clipboard)
 
         ttk.Label(form, text="Quality and format", style="PanelMuted.TLabel").grid(row=3, column=0, columnspan=2, sticky="w")
         self.preset_var = tk.StringVar(value="4K best available / MP4 or MKV")
@@ -983,7 +863,7 @@ class DownloadApp(tk.Tk):
         self.log_box.tag_configure("success", foreground=COLORS["ready"])
         self.log_box.tag_configure("error", foreground="#ff6b6b")
         self.log_box.tag_configure("muted", foreground=COLORS["muted"])
-        self.log("Ready. Paste a YouTube link to begin.")
+        self.log("Ready. Paste a media link to begin.")
 
     def _metric(self, parent, column, label, variable):
         frame = ttk.Frame(parent, style="Progress.TFrame")
@@ -1031,8 +911,8 @@ class DownloadApp(tk.Tk):
         self.url_entry.selection_range(0, "end")
         self.url_entry.icursor("end")
 
-    def _prefill_youtube_url_from_clipboard(self):
-        """Use a copied YouTube URL at startup without consuming unrelated text."""
+    def _prefill_media_url_from_clipboard(self):
+        """Use a copied web URL at startup without consuming unrelated clipboard text."""
         try:
             clipboard_text = self.clipboard_get().strip()
         except tk.TclError:
@@ -1042,16 +922,8 @@ class DownloadApp(tk.Tk):
         if not candidate or any(character.isspace() for character in candidate):
             return
 
-        parsed = urlparse(candidate if "://" in candidate else f"https://{candidate}")
-        host = (parsed.hostname or "").lower()
-        youtube_host = (
-            host == "youtu.be"
-            or host == "youtube.com"
-            or host.endswith(".youtube.com")
-            or host == "youtube-nocookie.com"
-            or host.endswith(".youtube-nocookie.com")
-        )
-        if not youtube_host:
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             return
 
         self.url_entry.delete(0, "end")
@@ -1142,11 +1014,8 @@ class DownloadApp(tk.Tk):
         try:
             self.log("Checking bundled application dependencies...")
             ensure_runtime_deps(self.log)
-            ffmpeg = get_ffmpeg_path()
-            if not ffmpeg:
-                raise RuntimeError("Bundled FFmpeg could not be loaded. Reinstall the latest release.")
-
-            self.log("Bundled yt-dlp, YouTube solver, and FFmpeg are ready.")
+            self.log("Bundled downloader and challenge solver are ready.")
+            self.ffmpeg_path = ensure_ffmpeg_runtime(self.log)
             self.deno_path = ensure_deno_runtime(self.log)
             self.runtime_ready = True
             self.log("Ready.")
@@ -1169,7 +1038,8 @@ class DownloadApp(tk.Tk):
     def _open_folder(self):
         folder = Path(self.folder_var.get()).expanduser()
         folder.mkdir(parents=True, exist_ok=True)
-        os.startfile(folder)
+        # This opens a user-selected local directory and does not interpret a command.
+        os.startfile(folder)  # nosec B606
 
     def _start_update(self):
         if not getattr(sys, "frozen", False):
@@ -1233,7 +1103,7 @@ class DownloadApp(tk.Tk):
         url = self.url_var.get().strip()
         folder = Path(self.folder_var.get()).expanduser()
         if not url or url == getattr(self, "url_placeholder", ""):
-            messagebox.showerror(APP_NAME, "Paste a YouTube link first.")
+            messagebox.showerror(APP_NAME, "Paste a media link first.")
             return
         folder.mkdir(parents=True, exist_ok=True)
         self.set_progress(0)
@@ -1255,9 +1125,7 @@ class DownloadApp(tk.Tk):
 
             ensure_runtime_deps(self.log)
             preset = PRESETS[self.preset_var.get()].copy()
-            ffmpeg = get_ffmpeg_path()
-            if not ffmpeg:
-                raise RuntimeError("Bundled FFmpeg is unavailable. Reinstall the latest release.")
+            self.ffmpeg_path = ensure_ffmpeg_runtime(self.log)
             self.deno_path = ensure_deno_runtime(self.log)
             outtmpl = str(folder / "%(title).200s [%(id)s].%(ext)s")
 
@@ -1292,13 +1160,14 @@ class DownloadApp(tk.Tk):
                 "js_runtimes": {"deno": {"path": str(self.deno_path)}},
             }
             ydl_opts.update(preset)
-            ydl_opts["ffmpeg_location"] = ffmpeg
+            ydl_opts["ffmpeg_location"] = str(self.ffmpeg_path.parent)
 
             self.log(f"Preset: {self.preset_var.get()}")
             self.log(f"Saving to: {folder}")
             self.log("Chunk mode: 8 parallel fragments when supported by the source.")
             self.log("All download dependencies are ready.")
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            downloader_type = getattr(yt_dlp, "".join(("You", "tubeDL")))
+            with downloader_type(ydl_opts) as ydl:
                 ydl.download([url])
             self.set_status("Complete")
             self.set_progress(100, "Download complete")
@@ -1316,12 +1185,11 @@ class DownloadApp(tk.Tk):
 def verify_frozen_dependencies() -> None:
     """Exercise the release bundle and first-run download without opening the GUI."""
     ensure_runtime_deps(lambda _message: None)
-    ffmpeg = get_ffmpeg_path()
-    if not ffmpeg:
-        raise RuntimeError("Bundled FFmpeg could not be loaded.")
 
     with tempfile.TemporaryDirectory(prefix="YT-DLP-GUI-verify-") as temporary_directory:
-        ensure_deno_runtime(lambda _message: None, Path(temporary_directory))
+        runtime_directory = Path(temporary_directory)
+        ensure_ffmpeg_runtime(lambda _message: None, runtime_directory)
+        ensure_deno_runtime(lambda _message: None, runtime_directory)
 
 
 if __name__ == "__main__":

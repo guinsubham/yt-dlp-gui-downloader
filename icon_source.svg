@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Download arrow entering a tray">
+  <rect x="32" y="32" width="960" height="960" rx="220" fill="#111111"/>
+  <rect x="52" y="52" width="920" height="920" rx="200" fill="none" stroke="#3b3b3b" stroke-width="24"/>
+  <path d="M512 184c-49 0-88 39-88 88v276H312c-34 0-65 20-79 51-14 31-8 68 15 93l203 219c16 18 38 27 61 27s45-9 61-27l203-219c23-25 29-62 15-93-14-31-45-51-79-51H600V272c0-49-39-88-88-88z" fill="#e78263"/>
+  <path d="M218 690v92c0 80 65 145 145 145h298c80 0 145-65 145-145v-92" fill="none" stroke="#91bd99" stroke-width="68" stroke-linecap="round"/>
+  <path d="M344 824h336" fill="none" stroke="#f7f5f2" stroke-width="30" stroke-linecap="round" opacity="0.92"/>
+</svg>
