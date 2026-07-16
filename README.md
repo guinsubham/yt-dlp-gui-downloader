@@ -20,7 +20,7 @@
 | Video output | MP4 or MKV, with presets from 480p through the best available 4K format |
 | Audio output | MP3 up to 320 kbps or M4A |
 | Download model | Eight parallel fragment workers when the source supports fragmented media |
-| User interface | Dark, rounded Windows GUI with clipboard detection, current media thumbnail, live progress, ETA, speed, size, and activity logs |
+| User interface | Dark, rounded Windows GUI with clipboard detection, current media thumbnail and title, live progress, ETA, speed, size, and activity logs |
 | Installation | Standalone executable and per-user installer; administrator access is not required |
 | Runtime setup | Verified first-run installation of the required script runtime and LGPL media processor |
 | Updates | In-app update button with GitHub release and SHA-256 verification |
@@ -33,7 +33,7 @@
 - MP3 320 kbps and M4A audio-only presets
 - Eight concurrent fragment downloads when supported by the source
 - Live percentage, ETA, speed, estimated size, and activity output
-- Current media thumbnail preview inside the live progress card
+- Current media thumbnail and title inside the live progress card
 - A continuous progress bar that visualizes all eight fragment lanes together
 - Automatic detection of a copied media URL from the clipboard
 - Right-click paste, cut, copy, and select-all controls in the link field

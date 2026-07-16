@@ -15,11 +15,11 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from runtime_dependencies import ensure_deno_runtime, ensure_ffmpeg_runtime
-from thumbnail_preview import best_thumbnail_url, fetch_thumbnail_bytes
+from thumbnail_preview import best_thumbnail_url, display_media_title, fetch_thumbnail_bytes
 from updater import get_latest_release, launch_update_after_exit, parse_version, prepare_update
 
 APP_NAME = "YT-DLP GUI Downloader"
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 ICON_PNG = "Ytdlp_gui_Icon.png"
 BRAILLE_WHEEL = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -590,6 +590,7 @@ class DownloadApp(tk.Tk):
         self.deno_path = None
         self.thumbnail_request_token = 0
         self.thumbnail_requested_url = None
+        self.media_title_requested = False
         self._build_style()
         self._build_ui()
         self._apply_window_chrome()
@@ -897,8 +898,28 @@ class DownloadApp(tk.Tk):
         self._metric(stats, 1, "ETA", self.eta_var)
         self._metric(stats, 2, "Speed", self.speed_var)
         self._metric(stats, 3, "File size", self.size_var)
-        self.thumbnail_preview = ThumbnailPreview(progress_card, height=146)
+        self.thumbnail_preview = ThumbnailPreview(progress_card, height=122)
         self.thumbnail_preview.grid(row=3, column=0, sticky="nsew", pady=(14, 0))
+        self.media_title_var = tk.StringVar()
+        title_frame = tk.Frame(progress_card, bg=COLORS["accent_2"], height=38)
+        title_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        title_frame.grid_propagate(False)
+        self.media_title_label = tk.Label(
+            title_frame,
+            textvariable=self.media_title_var,
+            bg=COLORS["accent_2"],
+            fg=COLORS["ink"],
+            font=("Segoe UI Semibold", 10),
+            anchor="nw",
+            justify="left",
+            padx=0,
+            pady=0,
+        )
+        self.media_title_label.place(x=0, y=0, relwidth=1, relheight=1)
+        self.media_title_label.bind(
+            "<Configure>",
+            lambda event: self.media_title_label.configure(wraplength=max(1, event.width)),
+        )
 
         log_panel = RoundedPanel(
             outer,
@@ -1194,7 +1215,9 @@ class DownloadApp(tk.Tk):
         self.size_var.set("--")
         self.thumbnail_request_token += 1
         self.thumbnail_requested_url = None
+        self.media_title_requested = False
         self.thumbnail_preview.clear()
+        self.media_title_var.set("")
         self.progress_var.set("Starting 8 chunk lanes...")
         self.status_var.set("Downloading")
         self.set_download_enabled(False)
@@ -1214,7 +1237,9 @@ class DownloadApp(tk.Tk):
             outtmpl = str(folder / "%(title).200s [%(id)s].%(ext)s")
 
             def hook(d):
-                self._request_thumbnail(d.get("info_dict"))
+                info = d.get("info_dict")
+                self._request_media_title(info)
+                self._request_thumbnail(info)
                 status = d.get("status")
                 if status == "downloading":
                     total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
@@ -1281,6 +1306,21 @@ class DownloadApp(tk.Tk):
             args=(thumbnail_url, token),
             daemon=True,
         ).start()
+
+    def _request_media_title(self, info):
+        if self.media_title_requested:
+            return
+
+        title = display_media_title(info)
+        if not title:
+            return
+
+        self.media_title_requested = True
+        self.after(0, self._show_media_title, self.thumbnail_request_token, title)
+
+    def _show_media_title(self, token, title):
+        if token == self.thumbnail_request_token:
+            self.media_title_var.set(title)
 
     def _load_thumbnail(self, thumbnail_url, token):
         try:
