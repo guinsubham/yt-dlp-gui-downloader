@@ -6,7 +6,7 @@ Pillow==12.3.0
 pycryptodomex==3.23.0
 requests==2.34.2
 urllib3==2.7.0
-websockets==16.0
+websockets==16.1
 yt-dlp==2026.6.9
 yt-dlp-ejs==0.8.0
 pyinstaller==6.20.0
