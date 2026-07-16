@@ -50,6 +50,16 @@ class ThumbnailPreviewTests(unittest.TestCase):
             "https://cdn.example/large.jpg",
         )
 
+    def test_display_media_title_normalizes_and_shortens_text(self):
+        info = {"title": "  A title\nwith   irregular spacing that is too long  "}
+        self.assertEqual(
+            thumbnail_preview.display_media_title(info, max_length=30),
+            "A title with irregular spac...",
+        )
+
+    def test_display_media_title_ignores_missing_title(self):
+        self.assertIsNone(thumbnail_preview.display_media_title({"id": "example"}))
+
     def test_thumbnail_url_rejects_private_network_hosts(self):
         private_result = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
         with patch("thumbnail_preview.socket.getaddrinfo", return_value=private_result):

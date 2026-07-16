@@ -38,6 +38,24 @@ def best_thumbnail_url(info: dict | None) -> str | None:
     return max(candidates, default=(0, None))[1]
 
 
+def display_media_title(info: dict | None, max_length: int = 110) -> str | None:
+    if not isinstance(info, dict):
+        return None
+
+    raw_title = info.get("title") or info.get("fulltitle")
+    if not isinstance(raw_title, str):
+        return None
+
+    normalized_title = " ".join(raw_title.split())
+    if not normalized_title:
+        return None
+
+    max_length = max(4, int(max_length))
+    if len(normalized_title) <= max_length:
+        return normalized_title
+    return normalized_title[: max_length - 3].rstrip() + "..."
+
+
 def _validate_public_thumbnail_url(url: str) -> str:
     if not isinstance(url, str) or len(url) > 4096:
         raise ThumbnailPreviewError("The thumbnail URL is invalid.")
