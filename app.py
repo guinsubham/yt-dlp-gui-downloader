@@ -78,6 +78,12 @@ COLORS = {
     "accent_hover": "#f09274",
     "accent_2": "#91bd99",
     "ready": "#91bd99",
+    "fetch": "#91bd99",
+    "fetch_hover": "#c3ffd6",
+    "download": "#2b7796",
+    "download_hover": "#20a1ff",
+    "cancel": "#e78263",
+    "cancel_hover": "#f09274",
     "ink": "#111111",
 }
 
@@ -872,9 +878,9 @@ class DownloadApp(tk.Tk):
             text="Fetch",
             command=self._start_fetch,
             surface=COLORS["panel"],
-            fill=COLORS["panel_soft"],
-            hover_fill=COLORS["border"],
-            foreground=COLORS["text"],
+            fill=COLORS["fetch"],
+            hover_fill=COLORS["fetch_hover"],
+            foreground=COLORS["ink"],
             width=60,
         )
         self.fetch_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
@@ -883,9 +889,9 @@ class DownloadApp(tk.Tk):
             text="↓ Download",
             command=self._start_download,
             surface=COLORS["panel"],
-            fill=COLORS["accent"],
-            hover_fill=COLORS["accent_hover"],
-            foreground=COLORS["ink"],
+            fill=COLORS["download"],
+            hover_fill=COLORS["download_hover"],
+            foreground=COLORS["text"],
             width=82,
         )
         self.download_btn.grid(row=0, column=1, sticky="ew", padx=(0, 8))
@@ -894,9 +900,9 @@ class DownloadApp(tk.Tk):
             text="✕ Cancel Download",
             command=self._cancel_download,
             surface=COLORS["panel"],
-            fill=COLORS["panel_soft"],
-            hover_fill="#713b3b",
-            foreground=COLORS["text"],
+            fill=COLORS["cancel"],
+            hover_fill=COLORS["cancel_hover"],
+            foreground=COLORS["ink"],
             width=140,
         )
         self.cancel_btn.grid(row=0, column=2, sticky="ew")
