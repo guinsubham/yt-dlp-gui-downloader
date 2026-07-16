@@ -12,6 +12,7 @@ The MIT License in this repository applies only to the original application sour
 | certifi | 2026.5.20 | MPL-2.0 | <https://github.com/certifi/python-certifi> |
 | charset-normalizer | 3.4.7 | MIT | <https://github.com/jawah/charset_normalizer> |
 | idna | 3.17 | BSD-3-Clause | <https://github.com/kjd/idna> |
+| Pillow | 12.3.0 | HPND | <https://github.com/python-pillow/Pillow> |
 | PyCryptodomeX | 3.23.0 | BSD-2-Clause and public-domain components | <https://github.com/Legrandin/pycryptodome> |
 | Requests | 2.34.2 | Apache-2.0 | <https://github.com/psf/requests> |
 | urllib3 | 2.7.0 | MIT | <https://github.com/urllib3/urllib3> |

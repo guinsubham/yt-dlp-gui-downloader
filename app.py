@@ -8,16 +8,18 @@ import ctypes
 import importlib
 import shutil
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from runtime_dependencies import ensure_deno_runtime, ensure_ffmpeg_runtime
+from thumbnail_preview import best_thumbnail_url, fetch_thumbnail_bytes
 from updater import get_latest_release, launch_update_after_exit, parse_version, prepare_update
 
 APP_NAME = "YT-DLP GUI Downloader"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 ICON_PNG = "Ytdlp_gui_Icon.png"
 BRAILLE_WHEEL = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -27,6 +29,7 @@ REQUIRED_RUNTIME_MODULES = {
     "charset_normalizer": "text encoding support",
     "Cryptodome": "cryptography support",
     "idna": "international domain support",
+    "PIL": "thumbnail preview support",
     "requests": "HTTP support",
     "urllib3": "HTTP transport",
     "websockets": "WebSocket support",
@@ -39,6 +42,7 @@ SOURCE_DEPENDENCIES = (
     "certifi==2026.5.20",
     "charset-normalizer==3.4.7",
     "idna==3.17",
+    "Pillow==12.3.0",
     "pycryptodomex==3.23.0",
     "requests==2.34.2",
     "urllib3==2.7.0",
@@ -324,6 +328,78 @@ class RoundedPanel(tk.Canvas):
         )
 
 
+class ThumbnailPreview(tk.Canvas):
+    """Stable 16:9 thumbnail surface with rounded image clipping."""
+
+    def __init__(self, parent, height=132):
+        super().__init__(
+            parent,
+            height=height,
+            bg=COLORS["accent_2"],
+            highlightthickness=0,
+            bd=0,
+        )
+        self.source_image = None
+        self.rendered_image = None
+        self.last_render_size = None
+        self.bind("<Configure>", lambda _event: self._draw())
+
+    def clear(self):
+        self.source_image = None
+        self.rendered_image = None
+        self.last_render_size = None
+        self._draw()
+
+    def set_image(self, image):
+        self.source_image = image.copy()
+        self.last_render_size = None
+        self._draw()
+
+    def _draw(self):
+        width = max(2, self.winfo_width())
+        height = max(2, self.winfo_height())
+        render_size = (width - 2, height - 2)
+        if self.source_image is not None and render_size == self.last_render_size:
+            return
+
+        self.delete("all")
+        self._create_round_rect(1, 1, width - 1, height - 1, 12, COLORS["input"])
+        if self.source_image is None:
+            return
+
+        from PIL import Image, ImageDraw, ImageOps, ImageTk
+
+        contained = ImageOps.contain(
+            self.source_image,
+            render_size,
+            method=Image.Resampling.LANCZOS,
+        ).convert("RGBA")
+        fitted = Image.new("RGBA", render_size, COLORS["input"])
+        image_position = (
+            (render_size[0] - contained.width) // 2,
+            (render_size[1] - contained.height) // 2,
+        )
+        fitted.paste(contained, image_position)
+        mask = Image.new("L", render_size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, render_size[0] - 1, render_size[1] - 1),
+            radius=12,
+            fill=255,
+        )
+        fitted.putalpha(mask)
+        self.rendered_image = ImageTk.PhotoImage(fitted)
+        self.create_image(width / 2, height / 2, image=self.rendered_image)
+        self.last_render_size = render_size
+
+    def _create_round_rect(self, x1, y1, x2, y2, radius, fill):
+        points = (
+            x1 + radius, y1, x2 - radius, y1, x2, y1, x2, y1 + radius,
+            x2, y2 - radius, x2, y2, x2 - radius, y2, x1 + radius, y2,
+            x1, y2, x1, y2 - radius, x1, y1 + radius, x1, y1,
+        )
+        self.create_polygon(points, smooth=True, splinesteps=24, fill=fill, outline="")
+
+
 class RoundedButton(tk.Canvas):
     """Rounded command button with hover, keyboard, and disabled states."""
 
@@ -512,6 +588,8 @@ class DownloadApp(tk.Tk):
         self.runtime_ready = False
         self.ffmpeg_path = None
         self.deno_path = None
+        self.thumbnail_request_token = 0
+        self.thumbnail_requested_url = None
         self._build_style()
         self._build_ui()
         self._apply_window_chrome()
@@ -796,6 +874,7 @@ class DownloadApp(tk.Tk):
         progress_panel.grid(row=0, column=1, sticky="nsew")
         progress_card = progress_panel.content
         progress_card.columnconfigure(0, weight=1)
+        progress_card.rowconfigure(3, weight=1)
 
         progress_row = ttk.Frame(progress_card, style="Progress.TFrame")
         progress_row.grid(row=0, column=0, sticky="ew", pady=(0, 14))
@@ -818,6 +897,8 @@ class DownloadApp(tk.Tk):
         self._metric(stats, 1, "ETA", self.eta_var)
         self._metric(stats, 2, "Speed", self.speed_var)
         self._metric(stats, 3, "File size", self.size_var)
+        self.thumbnail_preview = ThumbnailPreview(progress_card, height=146)
+        self.thumbnail_preview.grid(row=3, column=0, sticky="nsew", pady=(14, 0))
 
         log_panel = RoundedPanel(
             outer,
@@ -992,7 +1073,7 @@ class DownloadApp(tk.Tk):
             return "error"
         if "ready" in lowered or "complete" in lowered or text == "Done.":
             return "success"
-        if "ffmpeg" in lowered or "saving to:" in lowered or "preset:" in lowered:
+        if "ffmpeg" in lowered or "thumbnail" in lowered or "saving to:" in lowered or "preset:" in lowered:
             return "muted"
         return None
 
@@ -1111,6 +1192,9 @@ class DownloadApp(tk.Tk):
         self.eta_var.set("--:--:--")
         self.speed_var.set("--")
         self.size_var.set("--")
+        self.thumbnail_request_token += 1
+        self.thumbnail_requested_url = None
+        self.thumbnail_preview.clear()
         self.progress_var.set("Starting 8 chunk lanes...")
         self.status_var.set("Downloading")
         self.set_download_enabled(False)
@@ -1130,6 +1214,7 @@ class DownloadApp(tk.Tk):
             outtmpl = str(folder / "%(title).200s [%(id)s].%(ext)s")
 
             def hook(d):
+                self._request_thumbnail(d.get("info_dict"))
                 status = d.get("status")
                 if status == "downloading":
                     total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
@@ -1180,6 +1265,42 @@ class DownloadApp(tk.Tk):
         finally:
             self.set_download_enabled(True)
             self.set_update_enabled(True)
+
+    def _request_thumbnail(self, info):
+        if self.thumbnail_requested_url is not None:
+            return
+
+        thumbnail_url = best_thumbnail_url(info)
+        if not thumbnail_url:
+            return
+
+        self.thumbnail_requested_url = thumbnail_url
+        token = self.thumbnail_request_token
+        threading.Thread(
+            target=self._load_thumbnail,
+            args=(thumbnail_url, token),
+            daemon=True,
+        ).start()
+
+    def _load_thumbnail(self, thumbnail_url, token):
+        try:
+            from PIL import Image, ImageOps
+
+            payload = fetch_thumbnail_bytes(thumbnail_url)
+            with Image.open(BytesIO(payload)) as opened_image:
+                if opened_image.width * opened_image.height > 40_000_000:
+                    raise ValueError("Thumbnail dimensions exceed the preview limit.")
+                opened_image.load()
+                thumbnail = ImageOps.exif_transpose(opened_image).convert("RGB")
+            thumbnail.thumbnail((1280, 720), Image.Resampling.LANCZOS)
+            self.after(0, self._show_thumbnail, token, thumbnail)
+        except Exception:
+            if token == self.thumbnail_request_token:
+                self.log("Thumbnail preview unavailable; download continues.")
+
+    def _show_thumbnail(self, token, thumbnail):
+        if token == self.thumbnail_request_token:
+            self.thumbnail_preview.set_image(thumbnail)
 
 
 def verify_frozen_dependencies() -> None:
