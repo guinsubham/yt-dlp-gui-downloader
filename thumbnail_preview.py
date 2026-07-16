@@ -1,6 +1,10 @@
+import hashlib
 import importlib
 import ipaddress
+import os
+import shutil
 import socket
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 MAX_THUMBNAIL_BYTES = 8 * 1024 * 1024
@@ -10,6 +14,22 @@ REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 class ThumbnailPreviewError(RuntimeError):
     pass
+
+
+def default_thumbnail_cache_directory() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / "Programs" / "YT-DLP-GUI" / "cache" / "thumbnails"
+    return Path.home() / ".yt-dlp-gui" / "cache" / "thumbnails"
+
+
+def cached_thumbnail_path(cache_directory: Path, thumbnail_url: str) -> Path:
+    digest = hashlib.sha256(thumbnail_url.encode("utf-8")).hexdigest()
+    return Path(cache_directory) / f"{digest}.png"
+
+
+def clear_thumbnail_cache(cache_directory: Path) -> None:
+    shutil.rmtree(cache_directory, ignore_errors=True)
 
 
 def best_thumbnail_url(info: dict | None) -> str | None:
