@@ -36,6 +36,7 @@ class NetworkingTests(unittest.TestCase):
 
     def test_download_verified_file_enforces_exact_size_and_digest(self):
         payload = b"verified payload"
+        progress = []
         with tempfile.TemporaryDirectory() as temporary_directory:
             destination = Path(temporary_directory) / "asset.bin"
             with patch("networking._open_allowlisted", return_value=io.BytesIO(payload)):
@@ -46,8 +47,10 @@ class NetworkingTests(unittest.TestCase):
                     expected_size=len(payload),
                     maximum_size=1024,
                     headers={},
+                    progress_callback=lambda downloaded, total: progress.append((downloaded, total)),
                 )
             self.assertEqual(destination.read_bytes(), payload)
+        self.assertEqual(progress, [(0, len(payload)), (len(payload), len(payload))])
 
     def test_download_verified_file_rejects_size_mismatch(self):
         payload = b"too short"

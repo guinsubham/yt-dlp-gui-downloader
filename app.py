@@ -431,6 +431,8 @@ class RoundedButton(tk.Canvas):
         fill,
         foreground,
         hover_fill=None,
+        progress_fill=None,
+        notification_fill=None,
         width=130,
         height=44,
         radius=10,
@@ -449,10 +451,14 @@ class RoundedButton(tk.Canvas):
         self.command = command
         self.fill = fill
         self.hover_fill = hover_fill or fill
+        self.progress_fill = progress_fill or COLORS["accent"]
+        self.notification_fill = notification_fill or COLORS["accent"]
         self.foreground = foreground
         self.radius = radius
         self.state = "normal"
         self.hovered = False
+        self.progress = None
+        self.notification = False
         self.bind("<Configure>", lambda _event: self._draw())
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
@@ -465,9 +471,14 @@ class RoundedButton(tk.Canvas):
         options.update(kwargs)
         if "state" in options:
             self.state = options.pop("state")
-            self.configure(cursor="arrow" if self.state == "disabled" else "hand2")
+            super().configure(cursor="arrow" if self.state == "disabled" else "hand2")
         if "text" in options:
             self.button_text = options.pop("text")
+        if "progress" in options:
+            progress = options.pop("progress")
+            self.progress = None if progress is None else max(0.0, min(100.0, float(progress)))
+        if "notification" in options:
+            self.notification = bool(options.pop("notification"))
         if options:
             super().configure(**options)
         self._draw()
@@ -480,10 +491,16 @@ class RoundedButton(tk.Canvas):
         width = max(1, self.winfo_width())
         height = max(1, self.winfo_height())
         disabled = self.state == "disabled"
-        fill = COLORS["border"] if disabled else (self.hover_fill if self.hovered else self.fill)
-        foreground = COLORS["muted"] if disabled else self.foreground
+        progress_active = self.progress is not None
+        fill = self.fill if progress_active else (
+            COLORS["border"] if disabled else (self.hover_fill if self.hovered else self.fill)
+        )
+        foreground = self.foreground if progress_active else (COLORS["muted"] if disabled else self.foreground)
         self.delete("all")
         self._create_round_rect(1, 1, width - 1, height - 1, self.radius, fill)
+        if progress_active and self.progress > 0:
+            progress_width = (width - 2) * self.progress / 100
+            self._create_round_rect(1, 1, 1 + progress_width, height - 1, self.radius, self.progress_fill)
         self.create_text(
             width / 2,
             height / 2,
@@ -491,6 +508,16 @@ class RoundedButton(tk.Canvas):
             fill=foreground,
             font=("Segoe UI Semibold", 10),
         )
+        if self.notification and not progress_active:
+            self.create_oval(
+                width - 13,
+                1,
+                width - 3,
+                11,
+                fill=self.notification_fill,
+                outline=self.cget("bg"),
+                width=2,
+            )
 
     def _create_round_rect(self, x1, y1, x2, y2, radius, fill):
         radius = min(radius, (x2 - x1) / 2, (y2 - y1) / 2)
@@ -598,6 +625,8 @@ class DownloadApp(tk.Tk):
         self.download_thread = None
         self.metadata_thread = None
         self.update_thread = None
+        self.update_check_thread = None
+        self.available_release = None
         self.download_cancel_event = threading.Event()
         self.thumbnail_cache_lock = threading.Lock()
         self.thumbnail_cache_directory = default_thumbnail_cache_directory()
@@ -626,6 +655,8 @@ class DownloadApp(tk.Tk):
         self.update_btn.configure(state="disabled")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._drain_log)
+        if getattr(sys, "frozen", False):
+            self.after(1500, self._start_background_update_check)
         threading.Thread(target=self._bootstrap, daemon=True).start()
 
     def _apply_window_chrome(self):
@@ -786,6 +817,8 @@ class DownloadApp(tk.Tk):
             fill=COLORS["panel_soft"],
             hover_fill=COLORS["border"],
             foreground=COLORS["text"],
+            progress_fill=COLORS["accent"],
+            notification_fill=COLORS["accent"],
             width=96,
             height=34,
             radius=17,
@@ -1191,7 +1224,6 @@ class DownloadApp(tk.Tk):
             self.set_update_enabled(True)
             self.log(f"Dependency setup failed: {e}")
             self.after(0, messagebox.showerror, APP_NAME, f"First-run setup failed.\n\n{e}")
-
     def _browse(self):
         folder = filedialog.askdirectory(initialdir=self.folder_var.get() or str(Path.home()))
         if folder:
@@ -1227,34 +1259,86 @@ class DownloadApp(tk.Tk):
         if self.update_thread and self.update_thread.is_alive():
             return
 
-        self.update_btn.configure(state="disabled", text="Checking")
+        cached_release = self.available_release
+        self.update_btn.configure(
+            state="disabled",
+            text="0%" if cached_release else "Checking",
+            progress=0 if cached_release else None,
+            notification=False,
+        )
         self.fetch_btn.configure(state="disabled")
         self.download_btn.configure(state="disabled")
         self.cancel_btn.configure(state="disabled")
-        self.status_var.set("Checking")
-        self.log("Checking GitHub for an update...")
-        self.update_thread = threading.Thread(target=self._update_app, daemon=True)
+        self.status_var.set("Updating" if cached_release else "Checking")
+        if cached_release:
+            self.log(f"Downloading update {cached_release.tag}...")
+        else:
+            self.log("Checking GitHub for an update...")
+        self.update_thread = threading.Thread(target=self._update_app, args=(cached_release,), daemon=True)
         self.update_thread.start()
 
-    def _update_app(self):
+    def _start_background_update_check(self):
+        if self.is_closing or (self.update_thread and self.update_thread.is_alive()):
+            return
+        if self.update_check_thread and self.update_check_thread.is_alive():
+            return
+        self.update_check_thread = threading.Thread(target=self._check_update_availability, daemon=True)
+        self.update_check_thread.start()
+
+    def _check_update_availability(self):
         try:
             release = get_latest_release()
+            if release.version > parse_version(APP_VERSION) and not self.is_closing:
+                self.after(0, self._show_update_available, release)
+        except Exception as error:
+            self.log(f"Background update check skipped: {error}")
+
+    def _show_update_available(self, release):
+        if self.update_thread and self.update_thread.is_alive():
+            return
+        self.available_release = release
+        self.update_btn.configure(notification=True)
+        self.log(f"Update available: {APP_VERSION} -> {release.tag.lstrip('v')}")
+
+    def _begin_update_download(self, release):
+        self.available_release = release
+        self.status_var.set("Updating")
+        self.update_btn.configure(state="disabled", text="0%", progress=0, notification=False)
+
+    def _report_update_download_progress(self, downloaded, total):
+        if self.is_closing or total <= 0:
+            return
+        percent = min(100, int(downloaded * 100 / total))
+        self.after(0, self._set_update_download_progress, percent)
+
+    def _set_update_download_progress(self, percent):
+        if not self.is_closing:
+            self.update_btn.configure(text=f"{percent}%", progress=percent)
+
+    def _update_app(self, release=None):
+        try:
+            release = release or get_latest_release()
             if release.version <= parse_version(APP_VERSION):
+                self.available_release = None
                 self.log(f"Version {APP_VERSION} is already the latest release.")
                 self.after(0, self._finish_update_check, f"You already have the latest version ({APP_VERSION}).", False)
                 return
 
             self.log(f"Update available: {APP_VERSION} -> {release.tag.lstrip('v')}")
-            self.set_status("Updating")
-            self.after(0, lambda: self.update_btn.configure(text="Updating"))
-            prepared_update = prepare_update(release, self.log)
+            self.after(0, self._begin_update_download, release)
+            prepared_update = prepare_update(release, self.log, self._report_update_download_progress)
             self.after(0, self._install_prepared_update, prepared_update)
         except Exception as error:
             self.log(f"Update failed: {error}")
             self.after(0, self._finish_update_check, f"The update could not be installed.\n\n{error}", True)
 
     def _finish_update_check(self, message, is_error):
-        self.update_btn.configure(state="normal", text="↻ Update")
+        self.update_btn.configure(
+            state="normal",
+            text="↻ Update",
+            progress=None,
+            notification=self.available_release is not None,
+        )
         self.fetch_btn.configure(state="normal" if self.runtime_ready else "disabled")
         self.download_btn.configure(state="normal" if self.runtime_ready else "disabled")
         self.cancel_btn.configure(state="disabled", text="✕ Cancel Download")
@@ -1264,7 +1348,7 @@ class DownloadApp(tk.Tk):
 
     def _install_prepared_update(self, prepared_update):
         try:
-            launch_update_after_exit(prepared_update, os.getpid(), Path(sys.executable))
+            update_log_path = launch_update_after_exit(prepared_update, os.getpid(), Path(sys.executable))
         except Exception as error:
             shutil.rmtree(prepared_update.temporary_directory, ignore_errors=True)
             self.log(f"Update handoff failed: {error}")
@@ -1272,8 +1356,9 @@ class DownloadApp(tk.Tk):
             return
 
         self.status_var.set("Restarting")
-        self.update_btn.configure(text="Restarting")
+        self.update_btn.configure(text="Restarting", progress=100, notification=False)
         self.log(f"Update {prepared_update.release.tag} verified. Restarting to install...")
+        self.log(f"Updater diagnostics: {update_log_path}")
         self.after(350, self._on_close)
 
     def _requested_media_url(self):
