@@ -76,7 +76,7 @@ def get_latest_release() -> ReleaseInfo:
     )
 
 
-def prepare_update(release: ReleaseInfo, log) -> PreparedUpdate:
+def prepare_update(release: ReleaseInfo, log, progress_callback=None) -> PreparedUpdate:
     temporary_directory = Path(tempfile.mkdtemp(prefix="YT-DLP-GUI-update-"))
     archive_path = temporary_directory / WINDOWS_ASSET_NAME
     package_directory = temporary_directory / "package"
@@ -91,6 +91,7 @@ def prepare_update(release: ReleaseInfo, log) -> PreparedUpdate:
             expected_size=release.size,
             maximum_size=MAX_ARCHIVE_SIZE,
             headers={"User-Agent": "YT-DLP-GUI-Updater"},
+            progress_callback=progress_callback,
         )
 
         log("Update checksum verified. Preparing installation...")
@@ -157,23 +158,95 @@ def _installed_executable_path() -> Path:
     return Path(local_app_data).joinpath(*INSTALLED_EXECUTABLE_PARTS)
 
 
-def launch_update_after_exit(update: PreparedUpdate, process_id: int, restart_executable: Path) -> None:
-    installer = _powershell_literal(update.installer_path)
-    temporary_directory = _powershell_literal(update.temporary_directory)
-    installed_target = _powershell_literal(_installed_executable_path())
-    fallback_target = _powershell_literal(restart_executable)
-    command = (
-        "$ErrorActionPreference='Stop';"
-        f"Wait-Process -Id {int(process_id)} -ErrorAction SilentlyContinue;"
-        "$env:YT_DLP_GUI_SILENT='1';"
-        "$env:YT_DLP_GUI_NO_LAUNCH='1';"
-        "$exitCode=1;"
-        f"try {{ & {installer}; $exitCode=$LASTEXITCODE }} finally {{ "
-        "Start-Sleep -Seconds 3;"
-        f"Remove-Item -LiteralPath {temporary_directory} -Recurse -Force -ErrorAction SilentlyContinue }};"
-        f"if ($exitCode -eq 0 -and (Test-Path -LiteralPath {installed_target} -PathType Leaf)) "
-        f"{{ Start-Process -FilePath {installed_target} }} else {{ Start-Process -FilePath {fallback_target} }};"
-        "exit $exitCode"
+def _update_log_path() -> Path:
+    return _installed_executable_path().parent / "update.log"
+
+
+def _build_update_runner_script(
+    update: PreparedUpdate,
+    process_id: int,
+    restart_executable: Path,
+    installed_target: Path,
+    log_path: Path,
+) -> str:
+    """Build the detached updater script without relying on fragile inline quoting."""
+    lines = [
+        "$ErrorActionPreference = 'Stop'",
+        f"$processId = {int(process_id)}",
+        f"$installerPath = {_powershell_literal(update.installer_path)}",
+        f"$temporaryDirectory = {_powershell_literal(update.temporary_directory)}",
+        f"$installedTarget = {_powershell_literal(installed_target)}",
+        f"$fallbackTarget = {_powershell_literal(restart_executable)}",
+        f"$logPath = {_powershell_literal(log_path)}",
+        "$exitCode = 1",
+        "$restartPath = $fallbackTarget",
+        "",
+        "function Write-UpdateLog {",
+        "    param([string]$Message)",
+        "    try {",
+        "        $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'",
+        "        Add-Content -LiteralPath $logPath -Value \"[$timestamp] $Message\" -Encoding UTF8",
+        "    } catch {",
+        "        # Diagnostics must never prevent installation or restart.",
+        "    }",
+        "}",
+        "",
+        "function Start-UpdatedApplication {",
+        "    param([string]$ExecutablePath)",
+        "    $workingDirectory = Split-Path -Parent $ExecutablePath",
+        "    $launchedProcess = Start-Process -FilePath $ExecutablePath -WorkingDirectory $workingDirectory -PassThru",
+        "    Start-Sleep -Seconds 2",
+        "    if ($launchedProcess.HasExited) {",
+        "        throw 'The application exited before restart completed.'",
+        "    }",
+        "    Write-UpdateLog \"Restarted application from $ExecutablePath (PID $($launchedProcess.Id)).\"",
+        "}",
+        "",
+        "try {",
+        "    New-Item -ItemType Directory -Path (Split-Path -Parent $logPath) -Force | Out-Null",
+        "    Write-UpdateLog \"Waiting for application process $processId to exit.\"",
+        "    Wait-Process -Id $processId -ErrorAction SilentlyContinue",
+        "    $env:YT_DLP_GUI_SILENT = '1'",
+        "    $env:YT_DLP_GUI_NO_LAUNCH = '1'",
+        "    Write-UpdateLog 'Starting verified package installer.'",
+        "    & $installerPath",
+        "    $installerExitCode = $LASTEXITCODE",
+        "    if ($installerExitCode -ne 0) {",
+        "        throw \"The package installer exited with code $installerExitCode.\"",
+        "    }",
+        "    if (Test-Path -LiteralPath $installedTarget -PathType Leaf) {",
+        "        $restartPath = $installedTarget",
+        "    } elseif (-not (Test-Path -LiteralPath $fallbackTarget -PathType Leaf)) {",
+        "        throw 'No executable was available after installation.'",
+        "    }",
+        "    Start-UpdatedApplication $restartPath",
+        "    $exitCode = 0",
+        "} catch {",
+        "    Write-UpdateLog \"Update failed: $($_.Exception.Message)\"",
+        "    if (Test-Path -LiteralPath $fallbackTarget -PathType Leaf) {",
+        "        try {",
+        "            Start-UpdatedApplication $fallbackTarget",
+        "        } catch {",
+        "            Write-UpdateLog \"Fallback restart failed: $($_.Exception.Message)\"",
+        "        }",
+        "    }",
+        "} finally {",
+        "    Start-Sleep -Milliseconds 500",
+        "    Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue",
+        "}",
+        "exit $exitCode",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def launch_update_after_exit(update: PreparedUpdate, process_id: int, restart_executable: Path) -> Path:
+    installed_target = _installed_executable_path()
+    log_path = _update_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    runner_path = update.temporary_directory / "Apply-YT-DLP-GUI-Update.ps1"
+    runner_path.write_text(
+        _build_update_runner_script(update, process_id, restart_executable, installed_target, log_path),
+        encoding="utf-8-sig",
     )
     creation_flags = 0
     if os.name == "nt":
@@ -188,8 +261,8 @@ def launch_update_after_exit(update: PreparedUpdate, process_id: int, restart_ex
             "-NonInteractive",
             "-WindowStyle",
             "Hidden",
-            "-Command",
-            command,
+            "-File",
+            str(runner_path),
         ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -197,3 +270,4 @@ def launch_update_after_exit(update: PreparedUpdate, process_id: int, restart_ex
         close_fds=True,
         creationflags=creation_flags,
     )
+    return log_path

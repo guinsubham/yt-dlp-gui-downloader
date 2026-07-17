@@ -3,6 +3,7 @@ import io
 import json
 import shutil
 import sys
+import tempfile
 import unittest
 import zipfile
 from pathlib import Path
@@ -65,29 +66,37 @@ class UpdaterTests(unittest.TestCase):
             "0" * 64,
             1,
         )
-        prepared = updater.PreparedUpdate(
-            release=release,
-            temporary_directory=Path(r"C:\Temp\YT-DLP-GUI-update"),
-            installer_path=Path(r"C:\Temp\YT-DLP-GUI-update\Install-YT-DLP-GUI.bat"),
-        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            update_directory = Path(temporary_directory)
+            prepared = updater.PreparedUpdate(
+                release=release,
+                temporary_directory=update_directory,
+                installer_path=update_directory / "Install-YT-DLP-GUI.bat",
+            )
+            powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+            installed_executable = Path(r"C:\Users\Example\AppData\Local\Programs\YT-DLP-GUI\YT-DLP-GUI.exe")
+            update_log = update_directory / "update.log"
+            with patch("updater._windows_powershell_path", return_value=powershell), patch(
+                "updater._installed_executable_path", return_value=installed_executable
+            ), patch("updater._update_log_path", return_value=update_log), patch(
+                "updater.subprocess.Popen"
+            ) as popen:
+                returned_log = updater.launch_update_after_exit(prepared, 12345, Path(sys.executable))
 
-        powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
-        installed_executable = Path(r"C:\Users\Example\AppData\Local\Programs\YT-DLP-GUI\YT-DLP-GUI.exe")
-        with patch("updater._windows_powershell_path", return_value=powershell), patch(
-            "updater._installed_executable_path", return_value=installed_executable
-        ), patch("updater.subprocess.Popen") as popen:
-            updater.launch_update_after_exit(prepared, 12345, Path(sys.executable))
-
-        arguments = popen.call_args.args[0]
-        command = arguments[-1]
-        self.assertEqual(arguments[0], str(powershell))
-        self.assertIn("Wait-Process -Id 12345", command)
-        self.assertIn("YT_DLP_GUI_SILENT", command)
-        self.assertIn("YT_DLP_GUI_NO_LAUNCH", command)
-        self.assertIn(str(prepared.installer_path), command)
-        self.assertIn("$exitCode -eq 0", command)
-        self.assertIn(str(installed_executable), command)
-        self.assertIn(str(Path(sys.executable)), command)
+            arguments = popen.call_args.args[0]
+            runner_path = Path(arguments[-1])
+            runner = runner_path.read_text(encoding="utf-8-sig")
+            self.assertEqual(arguments[0], str(powershell))
+            self.assertEqual(arguments[-2], "-File")
+            self.assertEqual(returned_log, update_log)
+            self.assertIn("Wait-Process -Id $processId", runner)
+            self.assertIn("$processId = 12345", runner)
+            self.assertIn("YT_DLP_GUI_SILENT", runner)
+            self.assertIn("YT_DLP_GUI_NO_LAUNCH", runner)
+            self.assertIn(str(prepared.installer_path), runner)
+            self.assertIn("Start-UpdatedApplication $restartPath", runner)
+            self.assertIn(str(installed_executable), runner)
+            self.assertIn(str(Path(sys.executable)), runner)
 
     def test_packaged_installer_defers_launch_during_an_in_app_update(self):
         installer_path = Path(__file__).resolve().parents[1] / "packaging" / "Install-YT-DLP-GUI.bat"

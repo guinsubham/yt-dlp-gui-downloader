@@ -91,12 +91,15 @@ def download_verified_file(
     maximum_size: int,
     headers: dict[str, str],
     timeout: int = 120,
+    progress_callback=None,
 ) -> None:
     """Download one allowlisted GitHub asset and verify its exact size and digest."""
     require_https_url(url, GITHUB_DOWNLOAD_HOSTS)
     request = Request(url, headers=headers)
     hasher = hashlib.sha256()
     downloaded_size = 0
+    if progress_callback:
+        progress_callback(0, expected_size)
 
     with _open_allowlisted(request, GITHUB_DOWNLOAD_HOSTS, timeout) as response, destination.open("wb") as output:
         _validate_final_url(response, GITHUB_DOWNLOAD_HOSTS)
@@ -106,6 +109,8 @@ def download_verified_file(
                 raise RuntimeError("The downloaded file exceeded its verified size.")
             output.write(chunk)
             hasher.update(chunk)
+            if progress_callback:
+                progress_callback(downloaded_size, expected_size)
 
     if downloaded_size != expected_size:
         raise RuntimeError("The downloaded file size did not match GitHub metadata.")
