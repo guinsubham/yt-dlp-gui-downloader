@@ -15,11 +15,18 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from runtime_dependencies import ensure_deno_runtime, ensure_ffmpeg_runtime
-from thumbnail_preview import best_thumbnail_url, display_media_title, fetch_thumbnail_bytes
+from thumbnail_preview import (
+    best_thumbnail_url,
+    cached_thumbnail_path,
+    clear_thumbnail_cache,
+    default_thumbnail_cache_directory,
+    display_media_title,
+    fetch_thumbnail_bytes,
+)
 from updater import get_latest_release, launch_update_after_exit, parse_version, prepare_update
 
 APP_NAME = "YT-DLP GUI Downloader"
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 ICON_PNG = "Ytdlp_gui_Icon.png"
 BRAILLE_WHEEL = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -51,6 +58,11 @@ SOURCE_DEPENDENCIES = (
     "yt-dlp-ejs==0.8.0",
 )
 
+
+class DownloadCancelled(Exception):
+    pass
+
+
 COLORS = {
     "bg": "#080808",
     "shell": "#111111",
@@ -66,6 +78,12 @@ COLORS = {
     "accent_hover": "#f09274",
     "accent_2": "#91bd99",
     "ready": "#91bd99",
+    "fetch": "#91bd99",
+    "fetch_hover": "#c3ffd6",
+    "download": "#2b7796",
+    "download_hover": "#20a1ff",
+    "cancel": "#e78263",
+    "cancel_hover": "#f09274",
     "ink": "#111111",
 }
 
@@ -578,7 +596,12 @@ class DownloadApp(tk.Tk):
         self.configure(bg=COLORS["bg"])
         self.log_q = queue.Queue()
         self.download_thread = None
+        self.metadata_thread = None
         self.update_thread = None
+        self.download_cancel_event = threading.Event()
+        self.thumbnail_cache_lock = threading.Lock()
+        self.thumbnail_cache_directory = default_thumbnail_cache_directory()
+        self.is_closing = False
         self.spinner_index = 0
         self.progress_log_active = False
         self.last_progress_value = 0
@@ -591,12 +614,17 @@ class DownloadApp(tk.Tk):
         self.thumbnail_request_token = 0
         self.thumbnail_requested_url = None
         self.media_title_requested = False
+        self.preview_source_url = None
+        clear_thumbnail_cache(self.thumbnail_cache_directory)
         self._build_style()
         self._build_ui()
         self._apply_window_chrome()
         self.status_var.set("Preparing")
+        self.fetch_btn.configure(state="disabled")
         self.download_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="disabled")
         self.update_btn.configure(state="disabled")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._drain_log)
         threading.Thread(target=self._bootstrap, daemon=True).start()
 
@@ -840,28 +868,44 @@ class DownloadApp(tk.Tk):
         )
         browse_btn.grid(row=6, column=1, sticky="ew", padx=(10, 0), pady=(7, 18))
 
+        button_row = ttk.Frame(form, style="Panel.TFrame")
+        button_row.grid(row=7, column=0, columnspan=2, sticky="ew")
+        for column, weight in enumerate((3, 4, 7)):
+            button_row.columnconfigure(column, weight=weight)
+
+        self.fetch_btn = RoundedButton(
+            button_row,
+            text="Fetch",
+            command=self._start_fetch,
+            surface=COLORS["panel"],
+            fill=COLORS["fetch"],
+            hover_fill=COLORS["fetch_hover"],
+            foreground=COLORS["ink"],
+            width=60,
+        )
+        self.fetch_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self.download_btn = RoundedButton(
-            form,
+            button_row,
             text="↓ Download",
             command=self._start_download,
             surface=COLORS["panel"],
-            fill=COLORS["accent"],
-            hover_fill=COLORS["accent_hover"],
-            foreground=COLORS["ink"],
-            width=220,
-        )
-        self.download_btn.grid(row=7, column=0, sticky="ew")
-        open_folder_btn = RoundedButton(
-            form,
-            text="▣ Open Folder",
-            command=self._open_folder,
-            surface=COLORS["panel"],
-            fill=COLORS["panel_soft"],
-            hover_fill=COLORS["border"],
+            fill=COLORS["download"],
+            hover_fill=COLORS["download_hover"],
             foreground=COLORS["text"],
-            width=126,
+            width=82,
         )
-        open_folder_btn.grid(row=7, column=1, sticky="ew", padx=(10, 0))
+        self.download_btn.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.cancel_btn = RoundedButton(
+            button_row,
+            text="✕ Cancel Download",
+            command=self._cancel_download,
+            surface=COLORS["panel"],
+            fill=COLORS["cancel"],
+            hover_fill=COLORS["cancel_hover"],
+            foreground=COLORS["ink"],
+            width=140,
+        )
+        self.cancel_btn.grid(row=0, column=2, sticky="ew")
 
         progress_panel = RoundedPanel(
             workspace,
@@ -1066,6 +1110,18 @@ class DownloadApp(tk.Tk):
     def set_download_enabled(self, enabled):
         self.after(0, lambda: self.download_btn.configure(state="normal" if enabled else "disabled"))
 
+    def set_fetch_enabled(self, enabled):
+        self.after(0, lambda: self.fetch_btn.configure(state="normal" if enabled else "disabled"))
+
+    def set_cancel_enabled(self, enabled, text="✕ Cancel Download"):
+        self.after(
+            0,
+            lambda: self.cancel_btn.configure(
+                state="normal" if enabled else "disabled",
+                text=text,
+            ),
+        )
+
     def set_update_enabled(self, enabled):
         self.after(0, lambda: self.update_btn.configure(state="normal" if enabled else "disabled"))
 
@@ -1122,12 +1178,16 @@ class DownloadApp(tk.Tk):
             self.runtime_ready = True
             self.log("Ready.")
             self.set_status("Ready")
+            self.set_fetch_enabled(True)
             self.set_download_enabled(True)
+            self.set_cancel_enabled(False)
             self.set_update_enabled(True)
         except Exception as e:
             self.runtime_ready = False
             self.set_status("Setup failed")
+            self.set_fetch_enabled(False)
             self.set_download_enabled(False)
+            self.set_cancel_enabled(False)
             self.set_update_enabled(True)
             self.log(f"Dependency setup failed: {e}")
             self.after(0, messagebox.showerror, APP_NAME, f"First-run setup failed.\n\n{e}")
@@ -1143,6 +1203,17 @@ class DownloadApp(tk.Tk):
         # This opens a user-selected local directory and does not interpret a command.
         os.startfile(folder)  # nosec B606
 
+    def _on_close(self):
+        if self.is_closing:
+            return
+
+        self.is_closing = True
+        self.download_cancel_event.set()
+        self.thumbnail_request_token += 1
+        with self.thumbnail_cache_lock:
+            clear_thumbnail_cache(self.thumbnail_cache_directory)
+        self.destroy()
+
     def _start_update(self):
         if not getattr(sys, "frozen", False):
             messagebox.showinfo(APP_NAME, "Self-update is available in the installed Windows application.")
@@ -1150,11 +1221,16 @@ class DownloadApp(tk.Tk):
         if self.download_thread and self.download_thread.is_alive():
             messagebox.showinfo(APP_NAME, "Wait for the current download to finish before updating.")
             return
+        if self.metadata_thread and self.metadata_thread.is_alive():
+            messagebox.showinfo(APP_NAME, "Wait for Fetch to finish before updating.")
+            return
         if self.update_thread and self.update_thread.is_alive():
             return
 
         self.update_btn.configure(state="disabled", text="Checking")
+        self.fetch_btn.configure(state="disabled")
         self.download_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="disabled")
         self.status_var.set("Checking")
         self.log("Checking GitHub for an update...")
         self.update_thread = threading.Thread(target=self._update_app, daemon=True)
@@ -1179,7 +1255,9 @@ class DownloadApp(tk.Tk):
 
     def _finish_update_check(self, message, is_error):
         self.update_btn.configure(state="normal", text="↻ Update")
+        self.fetch_btn.configure(state="normal" if self.runtime_ready else "disabled")
         self.download_btn.configure(state="normal" if self.runtime_ready else "disabled")
+        self.cancel_btn.configure(state="disabled", text="✕ Cancel Download")
         self.status_var.set("Ready" if self.runtime_ready else "Preparing")
         dialog = messagebox.showerror if is_error else messagebox.showinfo
         dialog(APP_NAME, message)
@@ -1196,34 +1274,141 @@ class DownloadApp(tk.Tk):
         self.status_var.set("Restarting")
         self.update_btn.configure(text="Restarting")
         self.log(f"Update {prepared_update.release.tag} verified. Restarting to install...")
-        self.after(350, self.destroy)
+        self.after(350, self._on_close)
+
+    def _requested_media_url(self):
+        url = self.url_var.get().strip()
+        if not url or url == getattr(self, "url_placeholder", ""):
+            messagebox.showerror(APP_NAME, "Paste a media link first.")
+            return None
+        return url
+
+    def _begin_preview_session(self, url, *, force=False):
+        if not force and self.preview_source_url == url:
+            return
+
+        self.preview_source_url = url
+        self.thumbnail_request_token += 1
+        self.thumbnail_requested_url = None
+        self.media_title_requested = False
+        self.thumbnail_preview.clear()
+        self.media_title_var.set("")
+
+    def _start_fetch(self):
+        if self.download_thread and self.download_thread.is_alive():
+            messagebox.showinfo(APP_NAME, "Wait for the current download to finish before fetching details.")
+            return
+        if self.metadata_thread and self.metadata_thread.is_alive():
+            return
+        if not self.runtime_ready:
+            messagebox.showinfo(APP_NAME, "Wait for first-run setup to finish.")
+            return
+
+        url = self._requested_media_url()
+        if not url:
+            return
+
+        self._begin_preview_session(url, force=True)
+        token = self.thumbnail_request_token
+        self.status_var.set("Fetching")
+        self.progress_var.set("Fetching media details...")
+        self.fetch_btn.configure(state="disabled")
+        self.download_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="disabled")
+        self.update_btn.configure(state="disabled")
+        self.log("Fetching media title and thumbnail...")
+        self.metadata_thread = threading.Thread(
+            target=self._fetch_metadata,
+            args=(url, token),
+            daemon=True,
+        )
+        self.metadata_thread.start()
+
+    def _fetch_metadata(self, url, token):
+        try:
+            ensure_runtime_deps(self.log)
+            downloader_type = getattr(yt_dlp, "".join(("You", "tubeDL")))
+            options = {
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "socket_timeout": 15,
+                "js_runtimes": {"deno": {"path": str(self.deno_path)}},
+                "ffmpeg_location": str(self.ffmpeg_path.parent),
+            }
+            with downloader_type(options) as ydl:
+                info = ydl.extract_info(url, download=False)
+
+            entries = info.get("entries") if isinstance(info, dict) else None
+            if entries:
+                info = next((entry for entry in entries if isinstance(entry, dict)), None)
+            if not isinstance(info, dict):
+                raise RuntimeError("No media details were returned for this link.")
+            if token != self.thumbnail_request_token or self.is_closing:
+                return
+
+            self._request_media_title(info)
+            self._request_thumbnail(info)
+            self.log("Media title and thumbnail fetched.")
+            self.set_status("Ready")
+            self.after(0, self.progress_var.set, "Ready to download")
+        except Exception as error:
+            if self.is_closing:
+                return
+            self.log(f"Fetch failed: {error}")
+            self.set_status("Error")
+            self.after(0, messagebox.showerror, APP_NAME, f"Media details could not be fetched.\n\n{error}")
+        finally:
+            if not self.is_closing:
+                self.after(0, self._finish_fetch)
+
+    def _finish_fetch(self):
+        self.fetch_btn.configure(state="normal" if self.runtime_ready else "disabled")
+        self.download_btn.configure(state="normal" if self.runtime_ready else "disabled")
+        self.cancel_btn.configure(state="disabled", text="✕ Cancel Download")
+        self.update_btn.configure(state="normal")
 
     def _start_download(self):
         if self.download_thread and self.download_thread.is_alive():
             messagebox.showinfo(APP_NAME, "A download is already running.")
             return
-        url = self.url_var.get().strip()
-        folder = Path(self.folder_var.get()).expanduser()
-        if not url or url == getattr(self, "url_placeholder", ""):
-            messagebox.showerror(APP_NAME, "Paste a media link first.")
+        if self.metadata_thread and self.metadata_thread.is_alive():
+            messagebox.showinfo(APP_NAME, "Wait for Fetch to finish before downloading.")
             return
+
+        url = self._requested_media_url()
+        if not url:
+            return
+        folder = Path(self.folder_var.get()).expanduser()
         folder.mkdir(parents=True, exist_ok=True)
         self.set_progress(0)
         self.spinner_index = 0
         self.eta_var.set("--:--:--")
         self.speed_var.set("--")
         self.size_var.set("--")
-        self.thumbnail_request_token += 1
-        self.thumbnail_requested_url = None
-        self.media_title_requested = False
-        self.thumbnail_preview.clear()
-        self.media_title_var.set("")
+        self._begin_preview_session(url)
+        self.download_cancel_event.clear()
         self.progress_var.set("Starting 8 chunk lanes...")
         self.status_var.set("Downloading")
+        self.set_fetch_enabled(False)
         self.set_download_enabled(False)
+        self.set_cancel_enabled(True)
         self.set_update_enabled(False)
         self.download_thread = threading.Thread(target=self._download, args=(url, folder), daemon=True)
         self.download_thread.start()
+
+    def _cancel_download(self):
+        if not self.download_thread or not self.download_thread.is_alive():
+            return
+        if self.download_cancel_event.is_set():
+            return
+
+        self.download_cancel_event.set()
+        self.cancel_btn.configure(state="disabled", text="Cancelling...")
+        self.status_var.set("Cancelling")
+        self.progress_var.set("Stopping download...")
+        self.log("Cancellation requested. Waiting for the current transfer operation to stop...")
 
     def _download(self, url: str, folder: Path):
         try:
@@ -1237,6 +1422,8 @@ class DownloadApp(tk.Tk):
             outtmpl = str(folder / "%(title).200s [%(id)s].%(ext)s")
 
             def hook(d):
+                if self.download_cancel_event.is_set():
+                    raise DownloadCancelled("Download cancelled by the user.")
                 info = d.get("info_dict")
                 self._request_media_title(info)
                 self._request_thumbnail(info)
@@ -1259,9 +1446,14 @@ class DownloadApp(tk.Tk):
                     self.set_progress(100, "Processing with FFmpeg...")
                     self.log("Download finished. Processing with FFmpeg if needed...")
 
+            def postprocessor_hook(_status):
+                if self.download_cancel_event.is_set():
+                    raise DownloadCancelled("Download cancelled by the user.")
+
             ydl_opts = {
                 "outtmpl": outtmpl,
                 "progress_hooks": [hook],
+                "postprocessor_hooks": [postprocessor_hook],
                 "noplaylist": True,
                 "restrictfilenames": False,
                 "windowsfilenames": True,
@@ -1279,17 +1471,27 @@ class DownloadApp(tk.Tk):
             downloader_type = getattr(yt_dlp, "".join(("You", "tubeDL")))
             with downloader_type(ydl_opts) as ydl:
                 ydl.download([url])
+            if self.download_cancel_event.is_set():
+                raise DownloadCancelled("Download cancelled by the user.")
             self.set_status("Complete")
             self.set_progress(100, "Download complete")
             self.log("Done.")
-        except Exception as e:
-            self.set_status("Error")
-            self.set_progress(self.last_progress_value, "Download failed")
-            self.log(f"Error: {e}")
-            self.after(0, messagebox.showerror, APP_NAME, str(e))
+        except Exception as error:
+            if self.download_cancel_event.is_set():
+                self.set_status("Cancelled")
+                self.set_progress(self.last_progress_value, "Download cancelled")
+                self.log("Download cancelled. Partial data was kept for a possible resume.")
+            else:
+                self.set_status("Error")
+                self.set_progress(self.last_progress_value, "Download failed")
+                self.log(f"Error: {error}")
+                self.after(0, messagebox.showerror, APP_NAME, str(error))
         finally:
-            self.set_download_enabled(True)
-            self.set_update_enabled(True)
+            if not self.is_closing:
+                self.set_fetch_enabled(True)
+                self.set_download_enabled(True)
+                self.set_cancel_enabled(False)
+                self.set_update_enabled(True)
 
     def _request_thumbnail(self, info):
         if self.thumbnail_requested_url is not None:
@@ -1326,16 +1528,44 @@ class DownloadApp(tk.Tk):
         try:
             from PIL import Image, ImageOps
 
-            payload = fetch_thumbnail_bytes(thumbnail_url)
-            with Image.open(BytesIO(payload)) as opened_image:
-                if opened_image.width * opened_image.height > 40_000_000:
-                    raise ValueError("Thumbnail dimensions exceed the preview limit.")
-                opened_image.load()
-                thumbnail = ImageOps.exif_transpose(opened_image).convert("RGB")
-            thumbnail.thumbnail((1280, 720), Image.Resampling.LANCZOS)
+            cache_path = cached_thumbnail_path(self.thumbnail_cache_directory, thumbnail_url)
+            thumbnail = None
+            with self.thumbnail_cache_lock:
+                if self.is_closing:
+                    return
+                if cache_path.is_file():
+                    try:
+                        with Image.open(cache_path) as cached_image:
+                            cached_image.load()
+                            thumbnail = cached_image.convert("RGB")
+                    except Exception:
+                        cache_path.unlink(missing_ok=True)
+
+            if thumbnail is None:
+                payload = fetch_thumbnail_bytes(thumbnail_url)
+                with Image.open(BytesIO(payload)) as opened_image:
+                    if opened_image.width * opened_image.height > 40_000_000:
+                        raise ValueError("Thumbnail dimensions exceed the preview limit.")
+                    opened_image.load()
+                    thumbnail = ImageOps.exif_transpose(opened_image).convert("RGB")
+                thumbnail.thumbnail((1280, 720), Image.Resampling.LANCZOS)
+
+                with self.thumbnail_cache_lock:
+                    if self.is_closing:
+                        return
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary_path = cache_path.with_suffix(".tmp")
+                    try:
+                        thumbnail.save(temporary_path, format="PNG", optimize=True)
+                        os.replace(temporary_path, cache_path)
+                    finally:
+                        temporary_path.unlink(missing_ok=True)
+
+            if self.is_closing:
+                return
             self.after(0, self._show_thumbnail, token, thumbnail)
         except Exception:
-            if token == self.thumbnail_request_token:
+            if token == self.thumbnail_request_token and not self.is_closing:
                 self.log("Thumbnail preview unavailable; download continues.")
 
     def _show_thumbnail(self, token, thumbnail):

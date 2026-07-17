@@ -1,5 +1,7 @@
 import socket
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import thumbnail_preview
@@ -59,6 +61,25 @@ class ThumbnailPreviewTests(unittest.TestCase):
 
     def test_display_media_title_ignores_missing_title(self):
         self.assertIsNone(thumbnail_preview.display_media_title({"id": "example"}))
+
+    def test_cached_thumbnail_path_is_stable_and_cache_can_be_cleared(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            cache_directory = Path(temporary_directory) / "thumbnails"
+            first_path = thumbnail_preview.cached_thumbnail_path(
+                cache_directory,
+                "https://cdn.example/image.jpg",
+            )
+            second_path = thumbnail_preview.cached_thumbnail_path(
+                cache_directory,
+                "https://cdn.example/image.jpg",
+            )
+            self.assertEqual(first_path, second_path)
+            self.assertEqual(first_path.suffix, ".png")
+
+            cache_directory.mkdir()
+            first_path.write_bytes(b"cached thumbnail")
+            thumbnail_preview.clear_thumbnail_cache(cache_directory)
+            self.assertFalse(cache_directory.exists())
 
     def test_thumbnail_url_rejects_private_network_hosts(self):
         private_result = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
