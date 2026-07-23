@@ -5,6 +5,7 @@ import shutil
 # Required for the verified update handoff.
 import subprocess  # nosec B404
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -44,6 +45,7 @@ MAX_ARCHIVE_SIZE = 512 * 1024 * 1024
 MAX_MEMBER_SIZE = 300 * 1024 * 1024
 MAX_EXTRACTED_SIZE = 600 * 1024 * 1024
 INSTALLED_EXECUTABLE_PARTS = ("Programs", "YT-DLP-GUI", "YT-DLP-GUI.exe")
+RUNNER_READY_TIMEOUT = 5.0
 
 
 @dataclass(frozen=True)
@@ -199,6 +201,7 @@ def _build_update_runner_script(
     restart_executable: Path,
     installed_target: Path,
     log_path: Path,
+    ready_path: Path,
 ) -> str:
     """Build the detached updater script without relying on fragile inline quoting."""
     lines = [
@@ -209,6 +212,7 @@ def _build_update_runner_script(
         f"$installedTarget = {_powershell_literal(installed_target)}",
         f"$fallbackTarget = {_powershell_literal(restart_executable)}",
         f"$logPath = {_powershell_literal(log_path)}",
+        f"$readyPath = {_powershell_literal(ready_path)}",
         "$exitCode = 1",
         "$restartPath = $fallbackTarget",
         "",
@@ -235,8 +239,36 @@ def _build_update_runner_script(
         "",
         "try {",
         "    New-Item -ItemType Directory -Path (Split-Path -Parent $logPath) -Force | Out-Null",
+        "    Set-Content -LiteralPath $readyPath -Value $PID -Encoding ASCII",
         "    Write-UpdateLog \"Waiting for application process $processId to exit.\"",
         "    Wait-Process -Id $processId -ErrorAction SilentlyContinue",
+        "    if (Test-Path -LiteralPath $fallbackTarget -PathType Leaf) {",
+        "        Write-UpdateLog \"Waiting for the application executable to be released.\"",
+        "        $releaseDeadline = (Get-Date).AddSeconds(30)",
+        "        while ($true) {",
+        "            try {",
+        "                $lockProbe = [System.IO.File]::Open(",
+        "                    $fallbackTarget,",
+        "                    [System.IO.FileMode]::Open,",
+        "                    [System.IO.FileAccess]::ReadWrite,",
+        "                    [System.IO.FileShare]::None",
+        "                )",
+        "                $lockProbe.Dispose()",
+        "                break",
+        "            } catch [System.IO.IOException] {",
+        "                if ((Get-Date) -ge $releaseDeadline) {",
+        "                    throw 'The previous application process did not release its executable within 30 seconds.'",
+        "                }",
+        "                Start-Sleep -Milliseconds 200",
+        "            } catch [System.UnauthorizedAccessException] {",
+        "                if ((Get-Date) -ge $releaseDeadline) {",
+        "                    throw 'The previous application executable remained unavailable for 30 seconds.'",
+        "                }",
+        "                Start-Sleep -Milliseconds 200",
+        "            }",
+        "        }",
+        "        Write-UpdateLog 'The application executable was released.'",
+        "    }",
         "    $env:YT_DLP_GUI_SILENT = '1'",
         "    $env:YT_DLP_GUI_NO_LAUNCH = '1'",
         "    Write-UpdateLog 'Starting verified package installer.'",
@@ -275,23 +307,32 @@ def launch_update_after_exit(update: PreparedUpdate, process_id: int, restart_ex
     log_path = _update_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     runner_path = update.temporary_directory / "Apply-YT-DLP-GUI-Update.ps1"
+    ready_path = update.temporary_directory / "Apply-YT-DLP-GUI-Update.ready"
+    ready_path.unlink(missing_ok=True)
     runner_path.write_text(
-        _build_update_runner_script(update, process_id, restart_executable, installed_target, log_path),
+        _build_update_runner_script(
+            update,
+            process_id,
+            restart_executable,
+            installed_target,
+            log_path,
+            ready_path,
+        ),
         encoding="utf-8-sig",
     )
     creation_flags = 0
     if os.name == "nt":
-        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
 
     # Use the absolute system executable; no command search or shell expansion occurs.
-    subprocess.Popen(  # nosec B603
+    runner_process = subprocess.Popen(  # nosec B603
         [
             str(_windows_powershell_path()),
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
+            "-ExecutionPolicy",
+            "Bypass",
             "-File",
             str(runner_path),
         ],
@@ -301,4 +342,15 @@ def launch_update_after_exit(update: PreparedUpdate, process_id: int, restart_ex
         close_fds=True,
         creationflags=creation_flags,
     )
-    return log_path
+
+    deadline = time.monotonic() + RUNNER_READY_TIMEOUT
+    while time.monotonic() < deadline:
+        if ready_path.is_file():
+            return log_path
+        exit_code = runner_process.poll()
+        if exit_code is not None:
+            raise RuntimeError(f"The update helper exited before startup (code {exit_code}).")
+        time.sleep(0.05)
+
+    runner_process.terminate()
+    raise RuntimeError("The update helper did not start within 5 seconds.")
