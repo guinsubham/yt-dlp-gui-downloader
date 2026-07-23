@@ -20,8 +20,18 @@ if errorlevel 1 goto fail
 python -m pip install -r requirements.txt
 if errorlevel 1 goto fail
 
+python -m pip check
+if errorlevel 1 goto fail
+
+echo Running tests...
+python -m unittest discover -s tests -v
+if errorlevel 1 goto fail
+
 echo Building standalone EXE...
 pyinstaller --noconfirm --clean YT-DLP-GUI.spec
+if errorlevel 1 goto fail
+
+dist\YT-DLP-GUI.exe --verify-gui
 if errorlevel 1 goto fail
 
 echo.

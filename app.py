@@ -1,13 +1,12 @@
-﻿import os
+import os
 import sys
 import threading
-# Required for fixed-argument package setup in a source checkout.
-import subprocess  # nosec B404
 import queue
 import ctypes
 import importlib
 import shutil
 import tempfile
+import time
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
@@ -43,21 +42,6 @@ REQUIRED_RUNTIME_MODULES = {
     "yt_dlp": "yt-dlp",
     "yt_dlp_ejs": "challenge solver",
 }
-
-SOURCE_DEPENDENCIES = (
-    "brotli==1.2.0",
-    "certifi==2026.5.20",
-    "charset-normalizer==3.4.7",
-    "idna==3.17",
-    "Pillow==12.3.0",
-    "pycryptodomex==3.23.0",
-    "requests==2.34.2",
-    "urllib3==2.7.0",
-    "websockets==16.0",
-    "yt-dlp==2026.6.9",
-    "yt-dlp-ejs==0.8.0",
-)
-
 
 class DownloadCancelled(Exception):
     pass
@@ -105,8 +89,27 @@ def resource_path(filename: str) -> Path:
     return app_dir() / filename
 
 
+def ensure_installed_legal_files(log) -> None:
+    """Materialize bundled notices after an update from a legacy package."""
+    if not getattr(sys, "frozen", False):
+        return
+
+    source_licenses = resource_path("third_party_licenses")
+    source_notices = resource_path("THIRD_PARTY_NOTICES.md")
+    destination_licenses = app_dir() / "third_party_licenses"
+    destination_notices = app_dir() / "THIRD_PARTY_NOTICES.md"
+    if not source_licenses.is_dir() or not source_notices.is_file():
+        raise RuntimeError("The application package is missing its third-party license notices.")
+
+    if source_licenses.resolve() != destination_licenses.resolve():
+        shutil.copytree(source_licenses, destination_licenses, dirs_exist_ok=True)
+    if source_notices.resolve() != destination_notices.resolve():
+        shutil.copy2(source_notices, destination_notices)
+    log("Third-party license notices are ready.")
+
+
 def ensure_runtime_deps(log):
-    """Validate the frozen bundle, or repair missing packages in a source checkout."""
+    """Validate the frozen bundle or report source-checkout setup instructions."""
     global yt_dlp
 
     def find_missing_modules():
@@ -126,20 +129,11 @@ def ensure_runtime_deps(log):
         )
 
     if missing:
-        log(f"Installing missing source dependencies: {', '.join(missing)}...")
-        # The executable and package arguments are fixed constants and no shell is used.
-        subprocess.check_call([  # nosec B603
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--upgrade",
-            *SOURCE_DEPENDENCIES,
-        ])
-        importlib.invalidate_caches()
-        missing = find_missing_modules()
-        if missing:
-            raise RuntimeError(f"Dependency installation did not provide: {', '.join(missing)}.")
+        raise RuntimeError(
+            "Source dependencies are missing: "
+            f"{', '.join(missing)}. Create a virtual environment and run "
+            "'python -m pip install -r requirements.txt', then restart the application."
+        )
 
     yt_dlp = importlib.import_module("yt_dlp")
 
@@ -169,6 +163,19 @@ def format_bytes(value) -> str:
         value /= 1024
         unit_index += 1
     return f"{value:.1f} {units[unit_index]}"
+
+
+def is_supported_media_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname
+        and not parsed.username
+        and not parsed.password
+    )
 
 
 PRESETS = {
@@ -615,13 +622,18 @@ class RoundedBadge(tk.Canvas):
 
 
 class DownloadApp(tk.Tk):
-    def __init__(self):
+    def __init__(self, *, start_background_tasks=True):
         super().__init__()
         self.title(APP_NAME)
         self.geometry("920x640")
         self.minsize(820, 560)
         self.configure(bg=COLORS["bg"])
         self.log_q = queue.Queue()
+        self.ui_q = queue.Queue()
+        self.ui_update_lock = threading.Lock()
+        self.pending_ui_updates = {}
+        self.progress_log_lock = threading.Lock()
+        self.pending_progress_log = None
         self.download_thread = None
         self.metadata_thread = None
         self.update_thread = None
@@ -631,6 +643,7 @@ class DownloadApp(tk.Tk):
         self.thumbnail_cache_lock = threading.Lock()
         self.thumbnail_cache_directory = default_thumbnail_cache_directory()
         self.is_closing = False
+        self.close_deadline = None
         self.spinner_index = 0
         self.progress_log_active = False
         self.last_progress_value = 0
@@ -654,10 +667,12 @@ class DownloadApp(tk.Tk):
         self.cancel_btn.configure(state="disabled")
         self.update_btn.configure(state="disabled")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(50, self._drain_ui)
         self.after(120, self._drain_log)
-        if getattr(sys, "frozen", False):
-            self.after(1500, self._start_background_update_check)
-        threading.Thread(target=self._bootstrap, daemon=True).start()
+        if start_background_tasks:
+            if getattr(sys, "frozen", False):
+                self.after(1500, self._start_background_update_check)
+            threading.Thread(target=self._bootstrap, daemon=True).start()
 
     def _apply_window_chrome(self):
         icon_path = resource_path(ICON_PNG)
@@ -1101,8 +1116,7 @@ class DownloadApp(tk.Tk):
         if not candidate or any(character.isspace() for character in candidate):
             return
 
-        parsed = urlparse(candidate)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        if not is_supported_media_url(candidate):
             return
 
         self.url_entry.delete(0, "end")
@@ -1113,12 +1127,43 @@ class DownloadApp(tk.Tk):
         self.log_q.put(str(text))
 
     def log_progress(self, text):
-        self.log_q.put(("progress", str(text)))
+        with self.progress_log_lock:
+            self.pending_progress_log = str(text)
+
+    def post_ui(self, callback, *args, **kwargs):
+        """Queue a Tk operation for the main thread."""
+        if not self.is_closing:
+            self.ui_q.put((callback, args, kwargs))
+
+    def post_latest_ui(self, key, callback, *args, **kwargs):
+        """Coalesce high-frequency UI updates so downloads cannot flood Tk."""
+        if self.is_closing:
+            return
+        with self.ui_update_lock:
+            self.pending_ui_updates[key] = (callback, args, kwargs)
+
+    def _drain_ui(self):
+        if self.is_closing:
+            return
+
+        for _index in range(100):
+            try:
+                callback, args, kwargs = self.ui_q.get_nowait()
+            except queue.Empty:
+                break
+            callback(*args, **kwargs)
+
+        with self.ui_update_lock:
+            updates = tuple(self.pending_ui_updates.values())
+            self.pending_ui_updates.clear()
+        for callback, args, kwargs in updates:
+            callback(*args, **kwargs)
+
+        self.after(50, self._drain_ui)
 
     def set_progress(self, value, text=None):
-        # yt-dlp hooks run off the Tk thread; schedule UI mutation back on Tk's loop.
         self.last_progress_value = max(0, min(100, float(value)))
-        self.after(0, self._set_progress_ui, self.last_progress_value, text)
+        self.post_latest_ui("progress", self._set_progress_ui, self.last_progress_value, text)
 
     def _set_progress_ui(self, value, text=None):
         self.progress["value"] = value
@@ -1127,7 +1172,7 @@ class DownloadApp(tk.Tk):
             self.progress_var.set(text)
 
     def set_download_stats(self, eta=None, speed=None, size=None):
-        self.after(0, self._set_download_stats_ui, eta, speed, size)
+        self.post_latest_ui("download_stats", self._set_download_stats_ui, eta, speed, size)
 
     def _set_download_stats_ui(self, eta=None, speed=None, size=None):
         if eta is not None:
@@ -1138,43 +1183,58 @@ class DownloadApp(tk.Tk):
             self.size_var.set(size)
 
     def set_status(self, text):
-        self.after(0, self.status_var.set, text)
+        self.post_latest_ui("status", self.status_var.set, text)
 
     def set_download_enabled(self, enabled):
-        self.after(0, lambda: self.download_btn.configure(state="normal" if enabled else "disabled"))
+        self.post_latest_ui(
+            "download_enabled",
+            self.download_btn.configure,
+            state="normal" if enabled else "disabled",
+        )
 
     def set_fetch_enabled(self, enabled):
-        self.after(0, lambda: self.fetch_btn.configure(state="normal" if enabled else "disabled"))
+        self.post_latest_ui(
+            "fetch_enabled",
+            self.fetch_btn.configure,
+            state="normal" if enabled else "disabled",
+        )
 
     def set_cancel_enabled(self, enabled, text="✕ Cancel Download"):
-        self.after(
-            0,
-            lambda: self.cancel_btn.configure(
-                state="normal" if enabled else "disabled",
-                text=text,
-            ),
+        self.post_latest_ui(
+            "cancel_enabled",
+            self.cancel_btn.configure,
+            state="normal" if enabled else "disabled",
+            text=text,
         )
 
     def set_update_enabled(self, enabled):
-        self.after(0, lambda: self.update_btn.configure(state="normal" if enabled else "disabled"))
+        self.post_latest_ui(
+            "update_enabled",
+            self.update_btn.configure,
+            state="normal" if enabled else "disabled",
+        )
 
     def _drain_log(self):
         try:
-            while True:
+            for _index in range(100):
                 msg = self.log_q.get_nowait()
-                if isinstance(msg, tuple) and msg[0] == "progress":
-                    self._write_progress_log(msg[1])
+                text = str(msg)
+                tag = self._log_tag(text)
+                if tag:
+                    self.log_box.insert("end", text + "\n", tag)
                 else:
-                    text = str(msg)
-                    tag = self._log_tag(text)
-                    if tag:
-                        self.log_box.insert("end", text + "\n", tag)
-                    else:
-                        self.log_box.insert("end", text + "\n")
-                    self.progress_log_active = False
+                    self.log_box.insert("end", text + "\n")
+                self.progress_log_active = False
                 self.log_box.see("end")
         except queue.Empty:
             pass
+
+        with self.progress_log_lock:
+            progress_text = self.pending_progress_log
+            self.pending_progress_log = None
+        if progress_text is not None:
+            self._write_progress_log(progress_text)
+            self.log_box.see("end")
         self.after(120, self._drain_log)
 
     def _log_tag(self, text):
@@ -1203,6 +1263,7 @@ class DownloadApp(tk.Tk):
 
     def _bootstrap(self):
         try:
+            ensure_installed_legal_files(self.log)
             self.log("Checking bundled application dependencies...")
             ensure_runtime_deps(self.log)
             self.log("Bundled downloader and challenge solver are ready.")
@@ -1223,25 +1284,52 @@ class DownloadApp(tk.Tk):
             self.set_cancel_enabled(False)
             self.set_update_enabled(True)
             self.log(f"Dependency setup failed: {e}")
-            self.after(0, messagebox.showerror, APP_NAME, f"First-run setup failed.\n\n{e}")
+            self.post_ui(messagebox.showerror, APP_NAME, f"First-run setup failed.\n\n{e}")
     def _browse(self):
         folder = filedialog.askdirectory(initialdir=self.folder_var.get() or str(Path.home()))
         if folder:
             self.folder_var.set(folder)
 
     def _open_folder(self):
-        folder = Path(self.folder_var.get()).expanduser()
-        folder.mkdir(parents=True, exist_ok=True)
-        # This opens a user-selected local directory and does not interpret a command.
-        os.startfile(folder)  # nosec B606
+        try:
+            folder = Path(self.folder_var.get()).expanduser()
+            folder.mkdir(parents=True, exist_ok=True)
+            # This opens a user-selected local directory and does not interpret a command.
+            os.startfile(folder)  # nosec B606
+        except (OSError, ValueError) as error:
+            messagebox.showerror(APP_NAME, f"The selected folder could not be opened.\n\n{error}")
 
     def _on_close(self):
         if self.is_closing:
             return
 
+        if self.download_thread and self.download_thread.is_alive():
+            if not messagebox.askyesno(
+                APP_NAME,
+                "A download is still running. Cancel it and close the application?",
+            ):
+                return
+
         self.is_closing = True
         self.download_cancel_event.set()
         self.thumbnail_request_token += 1
+        self.close_deadline = time.monotonic() + 3.0
+        self._poll_close()
+
+    def _poll_close(self):
+        active_threads = (
+            self.download_thread,
+            self.metadata_thread,
+            self.update_thread,
+            self.update_check_thread,
+        )
+        if (
+            any(thread and thread.is_alive() for thread in active_threads)
+            and time.monotonic() < self.close_deadline
+        ):
+            self.after(50, self._poll_close)
+            return
+
         with self.thumbnail_cache_lock:
             clear_thumbnail_cache(self.thumbnail_cache_directory)
         self.destroy()
@@ -1289,7 +1377,7 @@ class DownloadApp(tk.Tk):
         try:
             release = get_latest_release()
             if release.version > parse_version(APP_VERSION) and not self.is_closing:
-                self.after(0, self._show_update_available, release)
+                self.post_ui(self._show_update_available, release)
         except Exception as error:
             self.log(f"Background update check skipped: {error}")
 
@@ -1309,7 +1397,7 @@ class DownloadApp(tk.Tk):
         if self.is_closing or total <= 0:
             return
         percent = min(100, int(downloaded * 100 / total))
-        self.after(0, self._set_update_download_progress, percent)
+        self.post_latest_ui("update_progress", self._set_update_download_progress, percent)
 
     def _set_update_download_progress(self, percent):
         if not self.is_closing:
@@ -1321,16 +1409,24 @@ class DownloadApp(tk.Tk):
             if release.version <= parse_version(APP_VERSION):
                 self.available_release = None
                 self.log(f"Version {APP_VERSION} is already the latest release.")
-                self.after(0, self._finish_update_check, f"You already have the latest version ({APP_VERSION}).", False)
+                self.post_ui(
+                    self._finish_update_check,
+                    f"You already have the latest version ({APP_VERSION}).",
+                    False,
+                )
                 return
 
             self.log(f"Update available: {APP_VERSION} -> {release.tag.lstrip('v')}")
-            self.after(0, self._begin_update_download, release)
+            self.post_ui(self._begin_update_download, release)
             prepared_update = prepare_update(release, self.log, self._report_update_download_progress)
-            self.after(0, self._install_prepared_update, prepared_update)
+            self.post_ui(self._install_prepared_update, prepared_update)
         except Exception as error:
             self.log(f"Update failed: {error}")
-            self.after(0, self._finish_update_check, f"The update could not be installed.\n\n{error}", True)
+            self.post_ui(
+                self._finish_update_check,
+                f"The update could not be installed.\n\n{error}",
+                True,
+            )
 
     def _finish_update_check(self, message, is_error):
         self.update_btn.configure(
@@ -1365,6 +1461,9 @@ class DownloadApp(tk.Tk):
         url = self.url_var.get().strip()
         if not url or url == getattr(self, "url_placeholder", ""):
             messagebox.showerror(APP_NAME, "Paste a media link first.")
+            return None
+        if not is_supported_media_url(url):
+            messagebox.showerror(APP_NAME, "Enter a valid HTTP or HTTPS media link.")
             return None
         return url
 
@@ -1437,16 +1536,20 @@ class DownloadApp(tk.Tk):
             self._request_thumbnail(info)
             self.log("Media title and thumbnail fetched.")
             self.set_status("Ready")
-            self.after(0, self.progress_var.set, "Ready to download")
+            self.post_latest_ui("progress_text", self.progress_var.set, "Ready to download")
         except Exception as error:
             if self.is_closing:
                 return
             self.log(f"Fetch failed: {error}")
             self.set_status("Error")
-            self.after(0, messagebox.showerror, APP_NAME, f"Media details could not be fetched.\n\n{error}")
+            self.post_ui(
+                messagebox.showerror,
+                APP_NAME,
+                f"Media details could not be fetched.\n\n{error}",
+            )
         finally:
             if not self.is_closing:
-                self.after(0, self._finish_fetch)
+                self.post_ui(self._finish_fetch)
 
     def _finish_fetch(self):
         self.fetch_btn.configure(state="normal" if self.runtime_ready else "disabled")
@@ -1465,8 +1568,13 @@ class DownloadApp(tk.Tk):
         url = self._requested_media_url()
         if not url:
             return
-        folder = Path(self.folder_var.get()).expanduser()
-        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            folder = Path(self.folder_var.get()).expanduser()
+            folder.mkdir(parents=True, exist_ok=True)
+        except (OSError, ValueError) as error:
+            messagebox.showerror(APP_NAME, f"The selected save location is unavailable.\n\n{error}")
+            return
+        preset_name = self.preset_var.get()
         self.set_progress(0)
         self.spinner_index = 0
         self.eta_var.set("--:--:--")
@@ -1480,7 +1588,11 @@ class DownloadApp(tk.Tk):
         self.set_download_enabled(False)
         self.set_cancel_enabled(True)
         self.set_update_enabled(False)
-        self.download_thread = threading.Thread(target=self._download, args=(url, folder), daemon=True)
+        self.download_thread = threading.Thread(
+            target=self._download,
+            args=(url, folder, preset_name),
+            daemon=True,
+        )
         self.download_thread.start()
 
     def _cancel_download(self):
@@ -1495,13 +1607,13 @@ class DownloadApp(tk.Tk):
         self.progress_var.set("Stopping download...")
         self.log("Cancellation requested. Waiting for the current transfer operation to stop...")
 
-    def _download(self, url: str, folder: Path):
+    def _download(self, url: str, folder: Path, preset_name: str):
         try:
             if not self.runtime_ready:
                 raise RuntimeError("First-run dependency setup has not completed.")
 
             ensure_runtime_deps(self.log)
-            preset = PRESETS[self.preset_var.get()].copy()
+            preset = PRESETS[preset_name].copy()
             self.ffmpeg_path = ensure_ffmpeg_runtime(self.log)
             self.deno_path = ensure_deno_runtime(self.log)
             outtmpl = str(folder / "%(title).200s [%(id)s].%(ext)s")
@@ -1549,7 +1661,7 @@ class DownloadApp(tk.Tk):
             ydl_opts.update(preset)
             ydl_opts["ffmpeg_location"] = str(self.ffmpeg_path.parent)
 
-            self.log(f"Preset: {self.preset_var.get()}")
+            self.log(f"Preset: {preset_name}")
             self.log(f"Saving to: {folder}")
             self.log("Chunk mode: 8 parallel fragments when supported by the source.")
             self.log("All download dependencies are ready.")
@@ -1570,7 +1682,7 @@ class DownloadApp(tk.Tk):
                 self.set_status("Error")
                 self.set_progress(self.last_progress_value, "Download failed")
                 self.log(f"Error: {error}")
-                self.after(0, messagebox.showerror, APP_NAME, str(error))
+                self.post_ui(messagebox.showerror, APP_NAME, str(error))
         finally:
             if not self.is_closing:
                 self.set_fetch_enabled(True)
@@ -1603,7 +1715,7 @@ class DownloadApp(tk.Tk):
             return
 
         self.media_title_requested = True
-        self.after(0, self._show_media_title, self.thumbnail_request_token, title)
+        self.post_ui(self._show_media_title, self.thumbnail_request_token, title)
 
     def _show_media_title(self, token, title):
         if token == self.thumbnail_request_token:
@@ -1648,7 +1760,7 @@ class DownloadApp(tk.Tk):
 
             if self.is_closing:
                 return
-            self.after(0, self._show_thumbnail, token, thumbnail)
+            self.post_ui(self._show_thumbnail, token, thumbnail)
         except Exception:
             if token == self.thumbnail_request_token and not self.is_closing:
                 self.log("Thumbnail preview unavailable; download continues.")
@@ -1672,6 +1784,13 @@ if __name__ == "__main__":
     if "--verify-dependencies" in sys.argv:
         try:
             verify_frozen_dependencies()
+        except Exception:
+            sys.exit(1)
+    elif "--verify-gui" in sys.argv:
+        try:
+            app = DownloadApp(start_background_tasks=False)
+            app.update_idletasks()
+            app.destroy()
         except Exception:
             sys.exit(1)
     else:

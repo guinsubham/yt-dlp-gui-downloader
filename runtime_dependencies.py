@@ -125,7 +125,10 @@ def _download_deno_runtime(target: Path, log) -> Path:
         raise RuntimeError("Automatic Deno installation is currently supported on Windows only.")
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="YT-DLP-GUI-deno-") as temporary_directory:
+    with tempfile.TemporaryDirectory(
+        prefix="YT-DLP-GUI-deno-",
+        dir=target.parent,
+    ) as temporary_directory:
         temporary_path = Path(temporary_directory)
         archive_path = temporary_path / DENO_WINDOWS_ASSET
         staged_executable = temporary_path / "deno.exe"
@@ -167,7 +170,10 @@ def _download_ffmpeg_runtime(target_directory: Path, log) -> Path:
         raise RuntimeError("Automatic media processor installation is currently supported on Windows only.")
 
     target_directory.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="YT-DLP-GUI-ffmpeg-") as temporary_directory:
+    with tempfile.TemporaryDirectory(
+        prefix="YT-DLP-GUI-ffmpeg-",
+        dir=target_directory.parent,
+    ) as temporary_directory:
         temporary_path = Path(temporary_directory)
         archive_path = temporary_path / FFMPEG_WINDOWS_ASSET
         staged_directory = temporary_path / "ffmpeg"
@@ -187,9 +193,19 @@ def _download_ffmpeg_runtime(target_directory: Path, log) -> Path:
         if not _ffmpeg_is_ready(staged_executable):
             raise RuntimeError("The downloaded media processor did not pass its version check.")
 
+        backup_directory = target_directory.with_name(f"{target_directory.name}.backup")
+        if backup_directory.exists():
+            shutil.rmtree(backup_directory)
         if target_directory.exists():
-            shutil.rmtree(target_directory)
-        os.replace(staged_directory, target_directory)
+            os.replace(target_directory, backup_directory)
+        try:
+            os.replace(staged_directory, target_directory)
+        except Exception:
+            if backup_directory.exists() and not target_directory.exists():
+                os.replace(backup_directory, target_directory)
+            raise
+        else:
+            shutil.rmtree(backup_directory, ignore_errors=True)
 
     log("The media processor was installed and verified.")
     return target_directory / "ffmpeg.exe"

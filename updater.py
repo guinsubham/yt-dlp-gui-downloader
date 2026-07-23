@@ -13,12 +13,32 @@ from networking import copy_stream_limited, download_verified_file, github_asset
 
 RELEASE_API = "https://api.github.com/repos/guinsubham/yt-dlp-gui-downloader/releases/latest"
 WINDOWS_ASSET_NAME = "YT-DLP-GUI-Windows.zip"
-REQUIRED_PACKAGE_FILES = (
+REQUIRED_ROOT_FILES = (
     "Install-YT-DLP-GUI.bat",
+    "Install-YT-DLP-GUI.ps1",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "Uninstall-YT-DLP-GUI.bat",
+    "Uninstall-YT-DLP-GUI.ps1",
     "YT-DLP-GUI.exe",
+)
+REQUIRED_LICENSE_FILES = (
+    "brotli-LICENSE.txt",
+    "certifi-LICENSE.txt",
+    "charset-normalizer-LICENSE.txt",
+    "idna-LICENSE.md",
+    "Pillow-LICENSE.txt",
+    "pycryptodomex-LICENSE.rst",
+    "pyinstaller-COPYING.txt",
+    "requests-LICENSE.txt",
+    "requests-NOTICE.txt",
+    "urllib3-LICENSE.txt",
+    "websockets-LICENSE.txt",
+    "yt-dlp-ejs-LICENSE.txt",
+    "yt-dlp-UNLICENSE.txt",
+)
+REQUIRED_PACKAGE_FILES = REQUIRED_ROOT_FILES + tuple(
+    f"third_party_licenses/{name}" for name in REQUIRED_LICENSE_FILES
 )
 MAX_ARCHIVE_SIZE = 512 * 1024 * 1024
 MAX_MEMBER_SIZE = 300 * 1024 * 1024
@@ -57,8 +77,15 @@ def get_latest_release() -> ReleaseInfo:
     }
     release = read_json(RELEASE_API, headers)
 
+    assets = release.get("assets", [])
+    if not isinstance(assets, list):
+        raise RuntimeError("GitHub returned malformed release metadata.")
     asset = next(
-        (item for item in release.get("assets", []) if item.get("name") == WINDOWS_ASSET_NAME),
+        (
+            item
+            for item in assets
+            if isinstance(item, dict) and item.get("name") == WINDOWS_ASSET_NAME
+        ),
         None,
     )
     if asset is None:
@@ -100,7 +127,10 @@ def prepare_update(release: ReleaseInfo, log, progress_callback=None) -> Prepare
             for member in archive.infolist():
                 if member.is_dir():
                     continue
-                name = PurePosixPath(member.filename).name
+                member_path = PurePosixPath(member.filename.replace("\\", "/"))
+                if member_path.is_absolute() or ".." in member_path.parts:
+                    raise RuntimeError("The update contains an unsafe archive path.")
+                name = member_path.as_posix()
                 if name in REQUIRED_PACKAGE_FILES:
                     if name in members_by_name:
                         raise RuntimeError(f"The update contains duplicate {name} files.")
@@ -115,7 +145,8 @@ def prepare_update(release: ReleaseInfo, log, progress_callback=None) -> Prepare
                 raise RuntimeError("The update exceeded the total extraction limit.")
 
             for name, member in members_by_name.items():
-                destination_path = package_directory / name
+                destination_path = package_directory.joinpath(*PurePosixPath(name).parts)
+                destination_path.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as source, destination_path.open("wb") as destination:
                     copy_stream_limited(
                         source,

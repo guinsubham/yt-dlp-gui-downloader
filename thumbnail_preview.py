@@ -99,9 +99,10 @@ def _validate_public_thumbnail_url(url: str) -> str:
 
 
 def fetch_thumbnail_bytes(url: str, *, session=None) -> bytes:
-    requests = importlib.import_module("requests")
     owns_session = session is None
-    session = session or requests.Session()
+    if owns_session:
+        requests = importlib.import_module("requests")
+        session = requests.Session()
     current_url = url
 
     try:

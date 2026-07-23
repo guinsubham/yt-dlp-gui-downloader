@@ -5,6 +5,8 @@ datas = []
 binaries = []
 hiddenimports = []
 datas += [('Ytdlp_gui_Icon.png', '.')]
+datas += [('THIRD_PARTY_NOTICES.md', '.')]
+datas += [('third_party_licenses', 'third_party_licenses')]
 tmp_ret = collect_all('yt_dlp')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('yt_dlp_ejs')
