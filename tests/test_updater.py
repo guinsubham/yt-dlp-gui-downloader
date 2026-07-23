@@ -35,6 +35,12 @@ class UpdaterTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "SHA-256"):
                 updater.get_latest_release()
 
+    def test_get_latest_release_rejects_malformed_assets(self):
+        payload = {"tag_name": "v2.0.0", "assets": "not-a-list"}
+        with patch("networking._open_allowlisted", return_value=io.BytesIO(json.dumps(payload).encode())):
+            with self.assertRaisesRegex(RuntimeError, "malformed release metadata"):
+                updater.get_latest_release()
+
     def test_prepare_update_verifies_and_extracts_only_required_files(self):
         archive_buffer = io.BytesIO()
         with zipfile.ZipFile(archive_buffer, "w") as archive:
@@ -53,7 +59,12 @@ class UpdaterTests(unittest.TestCase):
         with patch("networking._open_allowlisted", return_value=io.BytesIO(archive_bytes)):
             prepared = updater.prepare_update(release, lambda _message: None)
         try:
-            extracted = {item.name for item in prepared.installer_path.parent.iterdir()}
+            package_directory = prepared.installer_path.parent
+            extracted = {
+                item.relative_to(package_directory).as_posix()
+                for item in package_directory.rglob("*")
+                if item.is_file()
+            }
             self.assertEqual(extracted, set(updater.REQUIRED_PACKAGE_FILES))
         finally:
             shutil.rmtree(prepared.temporary_directory, ignore_errors=True)
@@ -99,13 +110,32 @@ class UpdaterTests(unittest.TestCase):
             self.assertIn(str(Path(sys.executable)), runner)
 
     def test_packaged_installer_defers_launch_during_an_in_app_update(self):
-        installer_path = Path(__file__).resolve().parents[1] / "packaging" / "Install-YT-DLP-GUI.bat"
-        installer = installer_path.read_text(encoding="ascii")
+        installer_path = Path(__file__).resolve().parents[1] / "packaging" / "Install-YT-DLP-GUI.ps1"
+        installer = installer_path.read_text(encoding="utf-8")
 
         self.assertIn(
-            'if not defined YT_DLP_GUI_NO_LAUNCH start "" "%INSTALLED_EXE%"',
+            "if (-not $env:YT_DLP_GUI_NO_LAUNCH)",
             installer,
         )
+
+    def test_prepare_update_rejects_unsafe_archive_paths(self):
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w") as archive:
+            for name in updater.REQUIRED_PACKAGE_FILES:
+                archive.writestr(name, "x")
+            archive.writestr("../unexpected.txt", "unsafe")
+        archive_bytes = archive_buffer.getvalue()
+        release = updater.ReleaseInfo(
+            tag="v2.0.0",
+            version=(2, 0, 0),
+            download_url="https://github.com/example/project/releases/download/v2/update.zip",
+            sha256=hashlib.sha256(archive_bytes).hexdigest(),
+            size=len(archive_bytes),
+        )
+
+        with patch("networking._open_allowlisted", return_value=io.BytesIO(archive_bytes)):
+            with self.assertRaisesRegex(RuntimeError, "unsafe archive path"):
+                updater.prepare_update(release, lambda _message: None)
 
     def test_prepare_update_rejects_oversized_archive_member(self):
         archive_buffer = io.BytesIO()

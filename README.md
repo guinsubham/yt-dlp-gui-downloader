@@ -58,6 +58,7 @@ The installer:
 - Checks the published file size and SHA-256 digest
 - Validates redirects and extracts only the expected package files
 - Verifies the executable fingerprint inside the packaged installer
+- Stages the complete installation and restores the previous version if activation fails
 - Installs for the current Windows user without administrator access
 - Creates desktop and Start Menu shortcuts
 - Registers an uninstaller in Windows settings
@@ -146,6 +147,23 @@ cd yt-dlp-gui-downloader
 
 The build script creates an isolated Python environment, installs pinned dependencies, and writes the standalone executable to `dist\YT-DLP-GUI.exe`.
 
+### Run from source
+
+The application does not install packages into the active Python environment automatically. Create a project-local environment first:
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python app.py
+```
+
+Run the unit suite with:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
 ## Project Structure
 
 | Path | Purpose |
@@ -155,7 +173,7 @@ The build script creates an isolated Python environment, installs pinned depende
 | `runtime_dependencies.py` | Verified first-run runtime installation and validation |
 | `updater.py` | Latest-release lookup, package verification, extraction, and restart handoff |
 | `install.ps1` | Public one-command Windows installer |
-| `packaging/` | Packaged installer and uninstaller templates |
+| `packaging/` | Transactional installer and path-scoped uninstaller templates |
 | `tests/` | Networking, runtime dependency, and updater tests |
 | `third_party_licenses/` | License texts for bundled third-party components |
 

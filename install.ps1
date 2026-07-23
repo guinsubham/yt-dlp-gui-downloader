@@ -25,7 +25,25 @@ $requiredNames = @(
     "THIRD_PARTY_NOTICES.md"
     "Uninstall-YT-DLP-GUI.bat"
     "YT-DLP-GUI.exe"
+    "third_party_licenses/brotli-LICENSE.txt"
+    "third_party_licenses/certifi-LICENSE.txt"
+    "third_party_licenses/charset-normalizer-LICENSE.txt"
+    "third_party_licenses/idna-LICENSE.md"
+    "third_party_licenses/Pillow-LICENSE.txt"
+    "third_party_licenses/pycryptodomex-LICENSE.rst"
+    "third_party_licenses/pyinstaller-COPYING.txt"
+    "third_party_licenses/requests-LICENSE.txt"
+    "third_party_licenses/requests-NOTICE.txt"
+    "third_party_licenses/urllib3-LICENSE.txt"
+    "third_party_licenses/websockets-LICENSE.txt"
+    "third_party_licenses/yt-dlp-ejs-LICENSE.txt"
+    "third_party_licenses/yt-dlp-UNLICENSE.txt"
 )
+$modernInstallerNames = @(
+    "Install-YT-DLP-GUI.ps1"
+    "Uninstall-YT-DLP-GUI.ps1"
+)
+$modernPackage = $false
 
 function Write-Step {
     param([Parameter(Mandatory)][string]$Message)
@@ -169,10 +187,27 @@ try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
     try {
+        $modernEntryCount = @(
+            $archive.Entries |
+                Where-Object {
+                    $_.FullName.Replace("\", "/") -in $modernInstallerNames -and $_.Name
+                }
+        ).Count
+        if ($modernEntryCount -eq $modernInstallerNames.Count) {
+            $modernPackage = $true
+            $requiredNames += $modernInstallerNames
+        }
+        elseif ($modernEntryCount -ne 0) {
+            throw "The verified package contains an incomplete transactional installer."
+        }
+
         $selectedEntries = @{}
         [long]$totalExtractedSize = 0
         foreach ($name in $requiredNames) {
-            $matches = @($archive.Entries | Where-Object { $_.FullName -eq $name -and $_.Name })
+            $matches = @(
+                $archive.Entries |
+                    Where-Object { $_.FullName.Replace("\", "/") -eq $name -and $_.Name }
+            )
             if ($matches.Count -ne 1) {
                 throw "The verified package must contain exactly one $name file."
             }
@@ -190,7 +225,11 @@ try {
         $buffer = New-Object byte[] (1MB)
         foreach ($name in $requiredNames) {
             $entry = $selectedEntries[$name]
-            $destinationPath = Join-Path $packageDirectory $name
+            $destinationPath = Join-Path $packageDirectory $name.Replace("/", "\")
+            $destinationParent = Split-Path -Parent $destinationPath
+            if (-not (Test-Path -LiteralPath $destinationParent)) {
+                New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+            }
             $source = $entry.Open()
             $destination = [System.IO.File]::Create($destinationPath)
             try {
@@ -244,6 +283,10 @@ try {
     & $installerPath
     if ($LASTEXITCODE -ne 0) {
         throw "The packaged installer exited with code $LASTEXITCODE."
+    }
+    if (-not $modernPackage) {
+        $installedLicenseDirectory = Join-Path $env:LOCALAPPDATA "Programs\YT-DLP-GUI\third_party_licenses"
+        Copy-Item -LiteralPath (Join-Path $packageDirectory "third_party_licenses") -Destination (Split-Path -Parent $installedLicenseDirectory) -Recurse -Force
     }
 
     Write-Host "YT-DLP GUI Downloader is ready." -ForegroundColor Green
