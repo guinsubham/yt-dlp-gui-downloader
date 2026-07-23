@@ -25,7 +25,7 @@ from thumbnail_preview import (
 from updater import get_latest_release, launch_update_after_exit, parse_version, prepare_update
 
 APP_NAME = "YT-DLP GUI Downloader"
-APP_VERSION = "1.0.11"
+APP_VERSION = "1.0.12"
 ICON_PNG = "Ytdlp_gui_Icon.png"
 BRAILLE_WHEEL = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -742,6 +742,7 @@ class DownloadApp(tk.Tk):
         style.configure("SoftValue.TLabel", background=COLORS["panel_soft"], foreground=COLORS["text"], font=("Segoe UI Semibold", 10))
         style.configure("Title.TLabel", font=("Segoe UI Semibold", 22), foreground=COLORS["text"], background=COLORS["shell"])
         style.configure("Eyebrow.TLabel", font=("Segoe UI Semibold", 9), foreground=COLORS["accent"], background=COLORS["shell"])
+        style.configure("HeaderVersion.TLabel", font=("Segoe UI Semibold", 9), foreground=COLORS["muted"], background=COLORS["shell"])
         style.configure("Section.TLabel", font=("Segoe UI Semibold", 12), foreground=COLORS["text"], background=COLORS["panel"])
         style.configure("Status.TLabel", font=("Segoe UI Semibold", 9), foreground=COLORS["ink"], background=COLORS["ready"], padding=(13, 7))
         style.configure("RailBrand.TLabel", font=("Segoe UI Black", 16), foreground=COLORS["accent"], background=COLORS["rail"])
@@ -824,9 +825,16 @@ class DownloadApp(tk.Tk):
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="A downloader based on yt-dlp", style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(header, text="YT-DLP GUI Downloader", style="Title.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(header, text=f"v{APP_VERSION}", style="HeaderVersion.TLabel").grid(
+            row=0,
+            column=1,
+            rowspan=2,
+            sticky="e",
+            padx=(0, 10),
+        )
         self.update_btn = RoundedButton(
             header,
-            text="↻ Update",
+            text="Update",
             command=self._start_update,
             surface=COLORS["shell"],
             fill=COLORS["panel_soft"],
@@ -834,11 +842,11 @@ class DownloadApp(tk.Tk):
             foreground=COLORS["text"],
             progress_fill=COLORS["accent"],
             notification_fill=COLORS["accent"],
-            width=96,
+            width=84,
             height=34,
             radius=17,
         )
-        self.update_btn.grid(row=0, column=1, rowspan=2, sticky="e", padx=(0, 10))
+        self.update_btn.grid(row=0, column=2, rowspan=2, sticky="e", padx=(0, 10))
         self.status_var = tk.StringVar(value="Ready")
         status_badge = RoundedBadge(
             header,
@@ -847,7 +855,7 @@ class DownloadApp(tk.Tk):
             fill=COLORS["ready"],
             foreground=COLORS["ink"],
         )
-        status_badge.grid(row=0, column=2, rowspan=2, sticky="e")
+        status_badge.grid(row=0, column=3, rowspan=2, sticky="e")
 
         self.url_placeholder = "paste your link here"
         workspace = ttk.Frame(outer, style="Shell.TFrame")
@@ -1431,7 +1439,7 @@ class DownloadApp(tk.Tk):
     def _finish_update_check(self, message, is_error):
         self.update_btn.configure(
             state="normal",
-            text="↻ Update",
+            text="Update",
             progress=None,
             notification=self.available_release is not None,
         )

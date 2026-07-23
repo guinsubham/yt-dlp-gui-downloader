@@ -25,6 +25,12 @@ class ProjectConsistencyTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(updater.parse_version(match.group(1)), tuple(map(int, match.group(1).split("."))))
 
+    def test_header_shows_version_and_uses_a_readable_update_label(self):
+        app_source = (PROJECT_ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn('text=f"v{APP_VERSION}"', app_source)
+        self.assertIn('text="Update"', app_source)
+        self.assertNotIn('text="↻ Update"', app_source)
+
     def test_uninstaller_targets_the_installed_executable_path(self):
         uninstaller = (
             PROJECT_ROOT / "packaging" / "Uninstall-YT-DLP-GUI.ps1"
