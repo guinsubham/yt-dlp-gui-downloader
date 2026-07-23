@@ -47,8 +47,19 @@ if defined YT_DLP_GUI_VERIFY_ONLY (
 
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 if errorlevel 1 goto :failed
-copy /Y "%SOURCE_EXE%" "%INSTALLED_EXE%" >nul
-if errorlevel 1 goto :failed
+set "COPY_ATTEMPT=0"
+:copy_executable
+set /a COPY_ATTEMPT+=1 >nul
+copy /Y "%SOURCE_EXE%" "%INSTALLED_EXE%" >nul 2>&1
+if not errorlevel 1 goto :executable_copied
+if %COPY_ATTEMPT% GEQ 30 (
+    echo ERROR: The previous application process did not release YT-DLP-GUI.exe.
+    goto :failed
+)
+"%SystemRoot%\System32\timeout.exe" /T 1 /NOBREAK >nul 2>&1
+goto :copy_executable
+
+:executable_copied
 copy /Y "%SOURCE_UNINSTALLER%" "%INSTALL_DIR%\Uninstall-YT-DLP-GUI.bat" >nul
 if errorlevel 1 goto :failed
 copy /Y "%SOURCE_LICENSE%" "%INSTALL_DIR%\LICENSE" >nul

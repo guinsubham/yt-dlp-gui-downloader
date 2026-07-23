@@ -7,7 +7,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import updater
 
@@ -87,10 +87,16 @@ class UpdaterTests(unittest.TestCase):
             powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
             installed_executable = Path(r"C:\Users\Example\AppData\Local\Programs\YT-DLP-GUI\YT-DLP-GUI.exe")
             update_log = update_directory / "update.log"
+            ready_path = update_directory / "Apply-YT-DLP-GUI-Update.ready"
+
+            def mark_runner_ready(*_args, **_kwargs):
+                ready_path.write_text("123", encoding="ascii")
+                return Mock()
+
             with patch("updater._windows_powershell_path", return_value=powershell), patch(
                 "updater._installed_executable_path", return_value=installed_executable
             ), patch("updater._update_log_path", return_value=update_log), patch(
-                "updater.subprocess.Popen"
+                "updater.subprocess.Popen", side_effect=mark_runner_ready
             ) as popen:
                 returned_log = updater.launch_update_after_exit(prepared, 12345, Path(sys.executable))
 
@@ -99,15 +105,54 @@ class UpdaterTests(unittest.TestCase):
             runner = runner_path.read_text(encoding="utf-8-sig")
             self.assertEqual(arguments[0], str(powershell))
             self.assertEqual(arguments[-2], "-File")
+            self.assertIn("-ExecutionPolicy", arguments)
+            self.assertEqual(arguments[arguments.index("-ExecutionPolicy") + 1], "Bypass")
+            self.assertNotIn("-WindowStyle", arguments)
+            self.assertEqual(
+                popen.call_args.kwargs["creationflags"],
+                updater.subprocess.CREATE_NEW_PROCESS_GROUP | updater.subprocess.CREATE_NO_WINDOW,
+            )
             self.assertEqual(returned_log, update_log)
+            self.assertIn("Set-Content -LiteralPath $readyPath", runner)
             self.assertIn("Wait-Process -Id $processId", runner)
             self.assertIn("$processId = 12345", runner)
             self.assertIn("YT_DLP_GUI_SILENT", runner)
             self.assertIn("YT_DLP_GUI_NO_LAUNCH", runner)
             self.assertIn(str(prepared.installer_path), runner)
             self.assertIn("Start-UpdatedApplication $restartPath", runner)
+            self.assertIn("Waiting for the application executable to be released.", runner)
+            self.assertIn("[System.IO.FileShare]::None", runner)
+            self.assertLess(
+                runner.index("[System.IO.FileShare]::None"),
+                runner.index("Starting verified package installer."),
+            )
             self.assertIn(str(installed_executable), runner)
             self.assertIn(str(Path(sys.executable)), runner)
+
+    def test_launch_update_keeps_app_open_when_runner_exits_before_ready(self):
+        release = updater.ReleaseInfo(
+            "v2.0.0",
+            (2, 0, 0),
+            "https://github.com/example/project/releases/download/v2/update.zip",
+            "0" * 64,
+            1,
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            update_directory = Path(temporary_directory)
+            prepared = updater.PreparedUpdate(
+                release=release,
+                temporary_directory=update_directory,
+                installer_path=update_directory / "Install-YT-DLP-GUI.bat",
+            )
+            runner_process = Mock()
+            runner_process.poll.return_value = 1
+            with patch("updater._windows_powershell_path", return_value=Path("powershell.exe")), patch(
+                "updater._installed_executable_path", return_value=update_directory / "installed.exe"
+            ), patch("updater._update_log_path", return_value=update_directory / "update.log"), patch(
+                "updater.subprocess.Popen", return_value=runner_process
+            ):
+                with self.assertRaisesRegex(RuntimeError, "exited before startup"):
+                    updater.launch_update_after_exit(prepared, 12345, Path(sys.executable))
 
     def test_packaged_installer_defers_launch_during_an_in_app_update(self):
         installer_path = Path(__file__).resolve().parents[1] / "packaging" / "Install-YT-DLP-GUI.ps1"
@@ -116,6 +161,18 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn(
             "if (-not $env:YT_DLP_GUI_NO_LAUNCH)",
             installer,
+        )
+
+    def test_legacy_installer_retries_while_onefile_bootloader_holds_executable(self):
+        installer_path = Path(__file__).resolve().parents[1] / "packaging" / "Install-YT-DLP-GUI.bat"
+        installer = installer_path.read_text(encoding="utf-8")
+
+        self.assertIn(":copy_executable", installer)
+        self.assertIn("if %COPY_ATTEMPT% GEQ 30", installer)
+        self.assertIn('"%SystemRoot%\\System32\\timeout.exe" /T 1 /NOBREAK', installer)
+        self.assertLess(
+            installer.index(":copy_executable"),
+            installer.index('copy /Y "%SOURCE_EXE%" "%INSTALLED_EXE%"'),
         )
 
     def test_prepare_update_rejects_unsafe_archive_paths(self):

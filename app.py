@@ -25,7 +25,7 @@ from thumbnail_preview import (
 from updater import get_latest_release, launch_update_after_exit, parse_version, prepare_update
 
 APP_NAME = "YT-DLP GUI Downloader"
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.0.11"
 ICON_PNG = "Ytdlp_gui_Icon.png"
 BRAILLE_WHEEL = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
