@@ -7,6 +7,7 @@ import importlib
 import shutil
 import tempfile
 import time
+import traceback
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
@@ -25,7 +26,7 @@ from thumbnail_preview import (
 from updater import get_latest_release, launch_update_after_exit, parse_version, prepare_update
 
 APP_NAME = "YT-DLP GUI Downloader"
-APP_VERSION = "1.0.12"
+APP_VERSION = "1.0.13"
 ICON_PNG = "Ytdlp_gui_Icon.png"
 BRAILLE_WHEEL = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -1793,6 +1794,12 @@ if __name__ == "__main__":
         try:
             verify_frozen_dependencies()
         except Exception:
+            diagnostic_path = os.environ.get("YT_DLP_GUI_VERIFY_LOG")
+            if diagnostic_path:
+                try:
+                    Path(diagnostic_path).write_text(traceback.format_exc(), encoding="utf-8")
+                except OSError:
+                    pass
             sys.exit(1)
     elif "--verify-gui" in sys.argv:
         try:
