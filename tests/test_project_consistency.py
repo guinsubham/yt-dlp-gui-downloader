@@ -65,6 +65,8 @@ class ProjectConsistencyTests(unittest.TestCase):
             PROJECT_ROOT / ".github" / "workflows" / "release.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("--verify-gui", workflow)
+        self.assertIn("PYINSTALLER_RESET_ENVIRONMENT", workflow)
+        self.assertIn("_MEI-deleted-restart-state", workflow)
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", workflow)
         self.assertIn("YT_DLP_GUI_VERIFY_LOG", workflow)
 

@@ -41,12 +41,21 @@ jobs:
       - name: Build executable
         run: pyinstaller --noconfirm --clean YT-DLP-GUI.spec
 
-      - name: Verify frozen GUI runtime
+      - name: Verify frozen GUI runtime and restart isolation
         shell: powershell
         run: |
           $process = Start-Process -FilePath "dist\YT-DLP-GUI.exe" -ArgumentList "--verify-gui" -Wait -PassThru
           if ($process.ExitCode -ne 0) {
             throw "The frozen GUI smoke test failed with exit code $($process.ExitCode)."
+          }
+          $executable = (Resolve-Path "dist\YT-DLP-GUI.exe").Path
+          $env:_PYI_ARCHIVE_FILE = $executable
+          $env:_PYI_APPLICATION_HOME_DIR = Join-Path $env:RUNNER_TEMP "_MEI-deleted-restart-state"
+          $env:_PYI_PARENT_PROCESS_LEVEL = "1"
+          $env:PYINSTALLER_RESET_ENVIRONMENT = "1"
+          $restartProcess = Start-Process -FilePath $executable -ArgumentList "--verify-gui" -Wait -PassThru
+          if ($restartProcess.ExitCode -ne 0) {
+            throw "The isolated restart smoke test failed with exit code $($restartProcess.ExitCode)."
           }
 
       - name: Verify frozen dependencies
