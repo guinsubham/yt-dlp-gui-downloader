@@ -25,9 +25,21 @@ DENO_MAX_EXECUTABLE_SIZE = 200 * 1024 * 1024
 MINIMUM_DENO_VERSION = (2, 6, 6)
 
 FFMPEG_RELEASE_API = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
-FFMPEG_WINDOWS_ASSET = "ffmpeg-master-latest-win64-lgpl.zip"
+FFMPEG_WINDOWS_ASSET_PATTERN = re.compile(
+    r"ffmpeg-(?:master-latest|N-\d+-g[0-9a-f]+)-win64-lgpl\.zip",
+    re.IGNORECASE,
+)
+FFMPEG_ARCHIVE_FILENAME = "ffmpeg-win64-lgpl.zip"
 FFMPEG_MAX_ARCHIVE_SIZE = 300 * 1024 * 1024
 FFMPEG_MAX_EXECUTABLE_SIZE = 250 * 1024 * 1024
+
+
+def _github_headers() -> dict[str, str]:
+    headers = dict(GITHUB_HEADERS)
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def _runtime_root() -> Path:
@@ -71,23 +83,49 @@ def _ffmpeg_is_ready(executable: Path) -> bool:
     return bool(re.search(r"^ffmpeg version\s+\S+", output or "", re.MULTILINE))
 
 
-def _find_release_asset(api_url: str, asset_name: str, maximum_size: int) -> tuple[str, str, int, str]:
-    release = read_json(api_url, GITHUB_HEADERS)
+def _find_release_asset(
+    api_url: str,
+    asset_selector: str | re.Pattern[str],
+    maximum_size: int,
+) -> tuple[str, str, int, str, str]:
+    release = read_json(api_url, _github_headers())
     assets = release.get("assets", [])
     if not isinstance(assets, list):
         raise RuntimeError("GitHub returned malformed release metadata.")
-    asset = next(
-        (item for item in assets if isinstance(item, dict) and item.get("name") == asset_name),
-        None,
-    )
-    if asset is None:
-        raise RuntimeError(f"The latest release does not contain {asset_name}.")
+    if isinstance(asset_selector, str):
+        matches = [
+            item
+            for item in assets
+            if isinstance(item, dict) and item.get("name") == asset_selector
+        ]
+        description = asset_selector
+    else:
+        matches = [
+            item
+            for item in assets
+            if isinstance(item, dict)
+            and asset_selector.fullmatch(str(item.get("name", "")))
+        ]
+        description = "the required Windows LGPL asset"
+    if len(matches) != 1:
+        raise RuntimeError(f"The latest release does not contain exactly one {description}.")
+    asset = matches[0]
     url, digest, size = github_asset_details(asset, maximum_size=maximum_size)
-    return url, digest, size, str(release.get("tag_name", "latest"))
+    return url, digest, size, str(release.get("tag_name", "latest")), str(asset["name"])
 
 
-def _download_asset(api_url: str, asset_name: str, maximum_size: int, archive_path: Path, log) -> None:
-    url, digest, size, tag = _find_release_asset(api_url, asset_name, maximum_size)
+def _download_asset(
+    api_url: str,
+    asset_selector: str | re.Pattern[str],
+    maximum_size: int,
+    archive_path: Path,
+    log,
+) -> None:
+    url, digest, size, tag, asset_name = _find_release_asset(
+        api_url,
+        asset_selector,
+        maximum_size,
+    )
     log(f"Downloading {asset_name} ({tag}) from its official GitHub release...")
     download_verified_file(
         url,
@@ -95,7 +133,7 @@ def _download_asset(api_url: str, asset_name: str, maximum_size: int, archive_pa
         expected_sha256=digest,
         expected_size=size,
         maximum_size=maximum_size,
-        headers=GITHUB_HEADERS,
+        headers=_github_headers(),
     )
 
 
@@ -175,10 +213,16 @@ def _download_ffmpeg_runtime(target_directory: Path, log) -> Path:
         dir=target_directory.parent,
     ) as temporary_directory:
         temporary_path = Path(temporary_directory)
-        archive_path = temporary_path / FFMPEG_WINDOWS_ASSET
+        archive_path = temporary_path / FFMPEG_ARCHIVE_FILENAME
         staged_directory = temporary_path / "ffmpeg"
         staged_directory.mkdir()
-        _download_asset(FFMPEG_RELEASE_API, FFMPEG_WINDOWS_ASSET, FFMPEG_MAX_ARCHIVE_SIZE, archive_path, log)
+        _download_asset(
+            FFMPEG_RELEASE_API,
+            FFMPEG_WINDOWS_ASSET_PATTERN,
+            FFMPEG_MAX_ARCHIVE_SIZE,
+            archive_path,
+            log,
+        )
 
         with zipfile.ZipFile(archive_path) as archive:
             for filename in ("ffmpeg.exe", "ffprobe.exe"):

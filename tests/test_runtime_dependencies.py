@@ -10,6 +10,49 @@ import runtime_dependencies
 
 
 class RuntimeDependencyTests(unittest.TestCase):
+    def test_github_headers_use_optional_actions_token(self):
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "test-token"}):
+            headers = runtime_dependencies._github_headers()
+
+        self.assertEqual(headers["Authorization"], "Bearer test-token")
+        self.assertNotIn("Authorization", runtime_dependencies.GITHUB_HEADERS)
+
+    def test_ffmpeg_release_selector_accepts_commit_specific_non_shared_asset(self):
+        asset = {
+            "name": "ffmpeg-N-125748-g80eb9e99b9-win64-lgpl.zip",
+            "browser_download_url": (
+                "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg.zip"
+            ),
+            "digest": "sha256:" + ("a" * 64),
+            "size": 100,
+        }
+        release = {
+            "tag_name": "autobuild-2026-07-23-14-16",
+            "assets": [
+                asset,
+                {**asset, "name": "ffmpeg-N-125748-g80eb9e99b9-win64-lgpl-shared.zip"},
+            ],
+        }
+        with patch("runtime_dependencies.read_json", return_value=release):
+            _url, _digest, _size, tag, name = runtime_dependencies._find_release_asset(
+                runtime_dependencies.FFMPEG_RELEASE_API,
+                runtime_dependencies.FFMPEG_WINDOWS_ASSET_PATTERN,
+                runtime_dependencies.FFMPEG_MAX_ARCHIVE_SIZE,
+            )
+
+        self.assertEqual(tag, release["tag_name"])
+        self.assertEqual(name, asset["name"])
+        self.assertIsNotNone(
+            runtime_dependencies.FFMPEG_WINDOWS_ASSET_PATTERN.fullmatch(
+                "ffmpeg-master-latest-win64-lgpl.zip"
+            )
+        )
+        self.assertIsNone(
+            runtime_dependencies.FFMPEG_WINDOWS_ASSET_PATTERN.fullmatch(
+                "ffmpeg-master-latest-win64-lgpl-shared.zip"
+            )
+        )
+
     def test_ffmpeg_setup_extracts_only_required_runtime_files(self):
         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as temporary_file:
             archive_source = Path(temporary_file.name)

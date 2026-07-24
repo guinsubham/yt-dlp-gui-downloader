@@ -51,9 +51,15 @@ jobs:
 
       - name: Verify frozen dependencies
         shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          YT_DLP_GUI_VERIFY_LOG: frozen-dependencies-error.txt
         run: |
           $process = Start-Process -FilePath "dist\YT-DLP-GUI.exe" -ArgumentList "--verify-dependencies" -Wait -PassThru
           if ($process.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $env:YT_DLP_GUI_VERIFY_LOG) {
+              Get-Content -LiteralPath $env:YT_DLP_GUI_VERIFY_LOG | Write-Error
+            }
             throw "The frozen dependency preflight failed with exit code $($process.ExitCode)."
           }
 
