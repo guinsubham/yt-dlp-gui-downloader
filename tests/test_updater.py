@@ -120,6 +120,11 @@ class UpdaterTests(unittest.TestCase):
             self.assertIn("YT_DLP_GUI_NO_LAUNCH", runner)
             self.assertIn(str(prepared.installer_path), runner)
             self.assertIn("Start-UpdatedApplication $restartPath", runner)
+            self.assertIn("$env:PYINSTALLER_RESET_ENVIRONMENT = '1'", runner)
+            self.assertLess(
+                runner.index("$env:PYINSTALLER_RESET_ENVIRONMENT = '1'"),
+                runner.index("Start-Process -FilePath $ExecutablePath"),
+            )
             self.assertIn("Waiting for the application executable to be released.", runner)
             self.assertIn("[System.IO.FileShare]::None", runner)
             self.assertLess(
